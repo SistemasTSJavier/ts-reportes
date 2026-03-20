@@ -20,6 +20,20 @@
     <section class="card p-4 sm:p-5">
       <div class="flex flex-wrap items-center gap-3">
         <span class="text-sm font-medium text-slate-700">Filtrar por movimiento</span>
+        <span
+          class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold"
+          :class="syncStatusClass"
+        >
+          {{ syncStatusText }}
+        </span>
+        <button
+          v-if="erroredSyncCount > 0"
+          type="button"
+          class="text-xs text-tactical-blue font-semibold hover:underline"
+          @click="retrySyncErrors"
+        >
+          Reintentar sincronización ({{ erroredSyncCount }})
+        </button>
         <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
           <button
             v-for="opt in movementOptions"
@@ -95,8 +109,10 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { useSyncStore } from '../stores/syncStore';
 
 const router = useRouter();
+const syncStore = useSyncStore();
 
 const movementFilter = ref<'all' | 'entrada' | 'salida'>('all');
 const registros = ref<Array<{
@@ -112,6 +128,23 @@ const movementOptions = [
   { label: 'Entrada', value: 'entrada' },
   { label: 'Salida', value: 'salida' }
 ] as const;
+
+const pendingSyncCount = computed(
+  () => syncStore.queue.filter((q) => q.status === 'pending' || q.status === 'processing').length
+);
+const erroredSyncCount = computed(() => syncStore.queue.filter((q) => q.status === 'error').length);
+const syncStatusText = computed(() => {
+  if (syncStore.connectivity === 'offline') return 'Sin conexión';
+  if (pendingSyncCount.value > 0) return `Sincronizando pendientes (${pendingSyncCount.value})`;
+  if (erroredSyncCount.value > 0) return `Errores de sincronización (${erroredSyncCount.value})`;
+  return 'Sincronización al día';
+});
+const syncStatusClass = computed(() => {
+  if (syncStore.connectivity === 'offline') return 'bg-amber-100 text-amber-800';
+  if (erroredSyncCount.value > 0) return 'bg-rose-100 text-rose-800';
+  if (pendingSyncCount.value > 0) return 'bg-blue-100 text-blue-800';
+  return 'bg-emerald-100 text-emerald-800';
+});
 
 function formatFolio(folio: string | null | undefined): string {
   if (!folio || typeof folio !== 'string') return '';
@@ -182,5 +215,9 @@ watch(
 
 function goNew() {
   router.push({ name: 'registro-new' });
+}
+
+function retrySyncErrors() {
+  void syncStore.retryErroredItems();
 }
 </script>

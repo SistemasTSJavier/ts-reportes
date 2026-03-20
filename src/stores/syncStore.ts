@@ -29,47 +29,160 @@ interface SyncState {
   queue: SyncItem[];
   syncing: boolean;
   history: SyncItem[];
+  connectivity: 'online' | 'offline';
+  retryAttempt: number;
+  retryTimerId: number | null;
 }
 
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
 const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
+const IDB_NAME = 'ts_ctpat_sync_db_v1';
+const IDB_STORE = 'kv';
+
+function openSyncDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet<T>(key: string): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    openSyncDb()
+      .then((db) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const req = store.get(key);
+        req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
+        req.onerror = () => reject(req.error);
+        tx.oncomplete = () => db.close();
+      })
+      .catch(reject);
+  });
+}
+
+function idbSet<T>(key: string, value: T): Promise<void> {
+  return new Promise((resolve, reject) => {
+    openSyncDb()
+      .then((db) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      })
+      .catch(reject);
+  });
+}
+
+function normalizeQueueItems(parsed: unknown): SyncItem[] {
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((it: any) => {
+    if (it?.kind) return it as SyncItem;
+    // Estructura antigua: { id, payload: { id, createdAt, folio }, status... }
+    const registroId = it?.payload?.id;
+    const folio = it?.payload?.folio;
+    return {
+      id: it?.id ?? registroId ?? String(Date.now()),
+      kind: 'generate_pdf',
+      payload: { registroId, folio } satisfies GeneratePdfPayload,
+      status: it?.status ?? 'pending',
+      lastError: it?.lastError,
+      updatedAt: it?.updatedAt ?? new Date().toISOString()
+    } satisfies SyncItem;
+  });
+}
 
 export const useSyncStore = defineStore('sync', {
   state: (): SyncState => ({
     queue: [],
     syncing: false,
-    history: []
+    history: [],
+    connectivity: navigator.onLine ? 'online' : 'offline',
+    retryAttempt: 0,
+    retryTimerId: null
   }),
   actions: {
-    loadFromStorage() {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const rawHistory = localStorage.getItem(HISTORY_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as SyncItem[];
-        // Backward-compatibilidad:
-        // si viene un item viejo sin `kind`, asumimos el formato anterior (generate_pdf)
-        this.queue = Array.isArray(parsed)
-          ? parsed.map((it: any) => {
-              if (it?.kind) return it as SyncItem;
-              // Estructura antigua: { id, payload: { id, createdAt, folio }, status... }
-              const registroId = it?.payload?.id;
-              const folio = it?.payload?.folio;
-              return {
-                id: it?.id ?? registroId ?? String(Date.now()),
-                kind: 'generate_pdf',
-                payload: { registroId, folio } satisfies GeneratePdfPayload,
-                status: it?.status ?? 'pending',
-                lastError: it?.lastError,
-                updatedAt: it?.updatedAt ?? new Date().toISOString()
-              } satisfies SyncItem;
-            })
-          : [];
-      }
-      if (rawHistory) {
-        this.history = JSON.parse(rawHistory);
+    clearRetryTimer() {
+      if (this.retryTimerId != null) {
+        window.clearTimeout(this.retryTimerId);
+        this.retryTimerId = null;
       }
     },
-    persist() {
+    async updateConnectivity() {
+      if (!navigator.onLine) {
+        this.connectivity = 'offline';
+        return;
+      }
+      try {
+        const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/auth/v1/health`, {
+          method: 'GET'
+        });
+        this.connectivity = res.ok ? 'online' : 'offline';
+      } catch {
+        this.connectivity = 'offline';
+      }
+    },
+    scheduleRetry() {
+      this.clearRetryTimer();
+      const ms = Math.min(60000, 5000 * 2 ** Math.max(0, this.retryAttempt - 1));
+      this.retryTimerId = window.setTimeout(() => {
+        void this.processQueue();
+      }, ms);
+    },
+    async loadFromStorage() {
+      try {
+        const queueFromDb = await idbGet<SyncItem[]>(STORAGE_KEY);
+        const historyFromDb = await idbGet<SyncItem[]>(HISTORY_KEY);
+
+        if (queueFromDb) {
+          this.queue = normalizeQueueItems(queueFromDb);
+        }
+        if (historyFromDb) {
+          this.history = Array.isArray(historyFromDb) ? historyFromDb : [];
+        }
+
+        // Migración automática desde localStorage -> IndexedDB.
+        if (!queueFromDb) {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            this.queue = normalizeQueueItems(JSON.parse(raw));
+            await idbSet(STORAGE_KEY, this.queue);
+          }
+        }
+        if (!historyFromDb) {
+          const rawHistory = localStorage.getItem(HISTORY_KEY);
+          if (rawHistory) {
+            this.history = JSON.parse(rawHistory);
+            await idbSet(HISTORY_KEY, this.history);
+          }
+        }
+      } catch (e) {
+        // Fallback a localStorage si IndexedDB no está disponible.
+        console.warn('SyncStore: IndexedDB no disponible, usando localStorage', e);
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const rawHistory = localStorage.getItem(HISTORY_KEY);
+        this.queue = raw ? normalizeQueueItems(JSON.parse(raw)) : [];
+        this.history = rawHistory ? JSON.parse(rawHistory) : [];
+      }
+    },
+    async persist() {
+      try {
+        await Promise.all([idbSet(STORAGE_KEY, this.queue), idbSet(HISTORY_KEY, this.history)]);
+      } catch (e) {
+        // Fallback para navegadores restringidos.
+        console.warn('SyncStore: error guardando en IndexedDB, usando localStorage', e);
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.queue));
       localStorage.setItem(HISTORY_KEY, JSON.stringify(this.history));
     },
@@ -84,7 +197,7 @@ export const useSyncStore = defineStore('sync', {
         updatedAt: now
       };
       this.queue.push(item);
-      this.persist();
+      void this.persist();
     },
     enqueueGeneratePdf(payload: GeneratePdfPayload) {
       const now = new Date().toISOString();
@@ -97,13 +210,16 @@ export const useSyncStore = defineStore('sync', {
         updatedAt: now
       };
       this.queue.push(item);
-      this.persist();
+      void this.persist();
     },
     async processQueue() {
       if (this.syncing || this.queue.length === 0) return;
-      if (!navigator.onLine) return;
+      await this.updateConnectivity();
+      if (this.connectivity !== 'online') return;
 
       this.syncing = true;
+      let hadError = false;
+      let hadSuccess = false;
       const functionsBaseUrl =
         import.meta.env.VITE_SUPABASE_FUNCTIONS_URL ??
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1`;
@@ -135,7 +251,7 @@ export const useSyncStore = defineStore('sync', {
           if (item.status !== 'pending') continue;
           item.status = 'processing';
           item.updatedAt = new Date().toISOString();
-          this.persist();
+          await this.persist();
 
           try {
             if (item.kind === 'generate_pdf') {
@@ -176,6 +292,7 @@ export const useSyncStore = defineStore('sync', {
               item.status = 'done';
               item.updatedAt = new Date().toISOString();
               this.history.unshift({ ...item });
+              hadSuccess = true;
             } else if (item.kind === 'create_registro_and_generate') {
               // 1) Generar folio
               const payload = item.payload as CreateRegistroAndGeneratePayload;
@@ -250,6 +367,7 @@ export const useSyncStore = defineStore('sync', {
                   folio: folioAuto
                 } satisfies GeneratePdfPayload
               });
+              hadSuccess = true;
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -257,17 +375,42 @@ export const useSyncStore = defineStore('sync', {
             item.lastError = message;
             item.updatedAt = new Date().toISOString();
             this.history.unshift({ ...item });
+            hadError = true;
           }
         }
 
         this.queue = this.queue.filter((q) => q.status === 'pending' || q.status === 'error');
-        this.persist();
+        await this.persist();
       } finally {
         this.syncing = false;
+        if (hadSuccess) {
+          this.retryAttempt = 0;
+          this.clearRetryTimer();
+        }
+        if (hadError && this.queue.some((q) => q.status === 'error' || q.status === 'pending')) {
+          this.retryAttempt += 1;
+          this.scheduleRetry();
+        }
       }
     },
+    async retryErroredItems() {
+      for (const item of this.queue) {
+        if (item.status === 'error') {
+          item.status = 'pending';
+          item.lastError = undefined;
+          item.updatedAt = new Date().toISOString();
+        }
+      }
+      await this.persist();
+      await this.processQueue();
+    },
     attachOnlineListener() {
+      window.addEventListener('offline', () => {
+        this.connectivity = 'offline';
+      });
       window.addEventListener('online', () => {
+        this.connectivity = 'online';
+        this.retryAttempt = 0;
         void this.processQueue();
       });
     }

@@ -67,10 +67,12 @@ const sync = useSyncStore();
 
 onMounted(() => {
   void auth.initSession();
-  sync.loadFromStorage();
-  sync.attachOnlineListener();
-  if (navigator.onLine) {
-    void sync.processQueue();
-  }
+  void (async () => {
+    await sync.loadFromStorage();
+    sync.attachOnlineListener();
+    if (navigator.onLine) {
+      await sync.processQueue();
+    }
+  })();
 });
 </script>
