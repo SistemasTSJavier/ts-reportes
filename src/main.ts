@@ -11,3 +11,9 @@ app.use(router);
 
 app.mount('#app');
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js');
+  });
+}
+

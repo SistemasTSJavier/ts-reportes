@@ -413,6 +413,16 @@ export const useSyncStore = defineStore('sync', {
         this.retryAttempt = 0;
         void this.processQueue();
       });
+    },
+    attachLifecycleListeners() {
+      const trigger = () => {
+        void this.processQueue();
+      };
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') trigger();
+      });
+      window.addEventListener('focus', trigger);
+      window.addEventListener('pageshow', trigger);
     }
   }
 });

@@ -70,6 +70,7 @@ onMounted(() => {
   void (async () => {
     await sync.loadFromStorage();
     sync.attachOnlineListener();
+    sync.attachLifecycleListeners();
     if (navigator.onLine) {
       await sync.processQueue();
     }
