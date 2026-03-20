@@ -53,6 +53,55 @@
       </div>
     </section>
 
+    <section class="card p-4 sm:p-5">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <h3 class="text-base font-semibold text-slate-800">Cola offline</h3>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-slate-500">Total: {{ syncQueueItems.length }}</span>
+          <button
+            v-if="erroredSyncCount > 0"
+            type="button"
+            class="text-xs text-rose-700 font-semibold hover:underline"
+            @click="clearSyncErrors"
+          >
+            Limpiar errores
+          </button>
+        </div>
+      </div>
+
+      <div v-if="syncQueueItems.length === 0" class="text-sm text-slate-500">
+        No hay elementos en cola.
+      </div>
+
+      <ul v-else class="space-y-2">
+        <li
+          v-for="item in syncQueueItems"
+          :key="item.id"
+          class="rounded-lg border border-slate-200 p-3 bg-white"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm font-semibold text-slate-800 truncate">
+                {{ syncItemTitle(item) }}
+              </p>
+              <p class="text-xs text-slate-500 mt-1">
+                Actualizado: {{ formatSyncDate(item.updatedAt) }}
+              </p>
+              <p v-if="item.lastError" class="text-xs text-rose-700 mt-1 break-words">
+                Error: {{ item.lastError }}
+              </p>
+            </div>
+            <span
+              class="shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold"
+              :class="syncItemBadgeClass(item.status)"
+            >
+              {{ syncItemStatusText(item.status) }}
+            </span>
+          </div>
+        </li>
+      </ul>
+    </section>
+
     <!-- Lista de registros por folio -->
     <section class="card p-4 sm:p-5">
       <div class="flex items-center justify-between gap-3 mb-4">
@@ -109,7 +158,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
-import { useSyncStore } from '../stores/syncStore';
+import { useSyncStore, type SyncKind } from '../stores/syncStore';
 
 const router = useRouter();
 const syncStore = useSyncStore();
@@ -129,10 +178,21 @@ const movementOptions = [
   { label: 'Salida', value: 'salida' }
 ] as const;
 
+interface QueueRow {
+  id: string;
+  kind: SyncKind;
+  status: 'pending' | 'processing' | 'done' | 'error';
+  lastError?: string;
+  updatedAt: string;
+}
+
 const pendingSyncCount = computed(
   () => syncStore.queue.filter((q) => q.status === 'pending' || q.status === 'processing').length
 );
 const erroredSyncCount = computed(() => syncStore.queue.filter((q) => q.status === 'error').length);
+const syncQueueItems = computed<QueueRow[]>(() =>
+  [...syncStore.queue].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+);
 const syncStatusText = computed(() => {
   if (syncStore.connectivity === 'offline') return 'Sin conexión';
   if (pendingSyncCount.value > 0) return `Sincronizando pendientes (${pendingSyncCount.value})`;
@@ -219,5 +279,35 @@ function goNew() {
 
 function retrySyncErrors() {
   void syncStore.retryErroredItems();
+}
+
+function clearSyncErrors() {
+  syncStore.queue = syncStore.queue.filter((q) => q.status !== 'error');
+  void syncStore.persist();
+}
+
+function syncItemStatusText(status: QueueRow['status']): string {
+  if (status === 'pending') return 'Pendiente';
+  if (status === 'processing') return 'Procesando';
+  if (status === 'done') return 'Completado';
+  return 'Error';
+}
+
+function syncItemBadgeClass(status: QueueRow['status']): string {
+  if (status === 'pending') return 'bg-amber-100 text-amber-800';
+  if (status === 'processing') return 'bg-blue-100 text-blue-800';
+  if (status === 'done') return 'bg-emerald-100 text-emerald-800';
+  return 'bg-rose-100 text-rose-800';
+}
+
+function syncItemTitle(item: QueueRow): string {
+  if (item.kind === 'create_registro_and_generate') return 'Crear registro + generar PDF';
+  return 'Generar PDF existente';
+}
+
+function formatSyncDate(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString();
 }
 </script>
