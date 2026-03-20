@@ -134,8 +134,10 @@ export const useAuthStore = defineStore('auth', {
       this.loading = true;
       // En despliegues (Vercel) evitamos que OAuth quede apuntando a `localhost`
       // usando una URL fija configurable desde Vercel.
-      const redirectTo =
+      const rawSiteUrl =
         (import.meta.env.VITE_SITE_URL as string | undefined) ?? window.location.origin;
+      // Normaliza para evitar mismatch en redirect URLs (por ejemplo, slash final).
+      const redirectTo = rawSiteUrl.replace(/\/$/, '');
 
       try {
         const { error } = await supabase.auth.signInWithOAuth({
