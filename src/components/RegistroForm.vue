@@ -904,17 +904,81 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     ctx.restore();
 
+    // Algunos móviles devuelven imágenes con letterboxing negro.
+    // Recortamos bordes oscuros para que en el PDF se vea limpia.
+    const trimBlackBorders = (source: HTMLCanvasElement): HTMLCanvasElement => {
+      const sctx = source.getContext('2d');
+      if (!sctx) return source;
+
+      const { width, height } = source;
+      if (width < 8 || height < 8) return source;
+
+      const rowHasContent = (y: number): boolean => {
+        const row = sctx.getImageData(0, y, width, 1).data;
+        let count = 0;
+        for (let i = 0; i < row.length; i += 4) {
+          const r = row[i];
+          const g = row[i + 1];
+          const b = row[i + 2];
+          const a = row[i + 3];
+          // Consideramos contenido cuando no es casi negro/transparente.
+          if (a > 20 && (r > 22 || g > 22 || b > 22)) count++;
+        }
+        return count >= Math.max(3, Math.floor(width * 0.015));
+      };
+
+      const colHasContent = (x: number): boolean => {
+        const col = sctx.getImageData(x, 0, 1, height).data;
+        let count = 0;
+        for (let i = 0; i < col.length; i += 4) {
+          const r = col[i];
+          const g = col[i + 1];
+          const b = col[i + 2];
+          const a = col[i + 3];
+          if (a > 20 && (r > 22 || g > 22 || b > 22)) count++;
+        }
+        return count >= Math.max(3, Math.floor(height * 0.015));
+      };
+
+      let top = 0;
+      let bottom = height - 1;
+      let left = 0;
+      let right = width - 1;
+
+      while (top < bottom && !rowHasContent(top)) top++;
+      while (bottom > top && !rowHasContent(bottom)) bottom--;
+      while (left < right && !colHasContent(left)) left++;
+      while (right > left && !colHasContent(right)) right--;
+
+      const cropW = right - left + 1;
+      const cropH = bottom - top + 1;
+
+      // Si no hay recorte significativo, mantenemos el canvas original.
+      if (cropW <= 0 || cropH <= 0) return source;
+      if (cropW > width * 0.98 && cropH > height * 0.98) return source;
+
+      const out = document.createElement('canvas');
+      out.width = cropW;
+      out.height = cropH;
+      const octx = out.getContext('2d');
+      if (!octx) return source;
+      octx.drawImage(source, left, top, cropW, cropH, 0, 0, cropW, cropH);
+      return out;
+    };
+
+    const normalizedCanvas = trimBlackBorders(canvas);
+
     // Compresión: exportamos como JPEG (en evidencia/Drive/Edge funciona perfecto).
     // Calidad inicial, si se pasa de tamaño repetimos con menor calidad.
     const maxBytes = 650 * 1024; // ~650KB por imagen (ajustable)
     let quality = 0.82;
-    let dataUrl = canvas.toDataURL('image/jpeg', quality);
+    let dataUrl = normalizedCanvas.toDataURL('image/jpeg', quality);
 
     const approxBytes = Math.floor((dataUrl.length * 3) / 4);
     if (approxBytes > maxBytes) {
       for (const q of [0.72, 0.62, 0.52]) {
         quality = q;
-        dataUrl = canvas.toDataURL('image/jpeg', quality);
+        dataUrl = normalizedCanvas.toDataURL('image/jpeg', quality);
         const b = Math.floor((dataUrl.length * 3) / 4);
         if (b <= maxBytes) break;
       }
