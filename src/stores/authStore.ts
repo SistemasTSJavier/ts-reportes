@@ -40,9 +40,15 @@ export const useAuthStore = defineStore('auth', {
           const token = (session as any).provider_token ?? null;
           this.googleAccessToken = token;
 
-          // Crear carpetas en Drive automáticamente si aún no tiene config
+          // Crear carpetas en Drive automáticamente si aún no tiene config.
+          // Importante: si falla (CORS/Google OAuth en móvil), NO debemos marcar al usuario como no logueado.
           if (token) {
-            await this.ensureUserDriveConfig(token);
+            try {
+              await this.ensureUserDriveConfig(token);
+            } catch (e) {
+              console.error('Error creando configuración Drive:', e);
+              this.driveConfigReady = false;
+            }
           }
         } else {
           this.isSignedIn = false;
