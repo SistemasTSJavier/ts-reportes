@@ -69,13 +69,30 @@
         </div>
       </div>
 
-      <div v-if="syncQueueItems.length === 0" class="text-sm text-slate-500">
+      <div class="mb-3 inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
+        <button
+          v-for="opt in queueFilterOptions"
+          :key="opt.value"
+          type="button"
+          class="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors"
+          :class="
+            queueFilter === opt.value
+              ? 'bg-tactical-blue text-white shadow-sm'
+              : 'text-slate-600 hover:text-slate-800 hover:bg-white'
+          "
+          @click="queueFilter = opt.value"
+        >
+          {{ opt.label }} ({{ queueFilterCount(opt.value) }})
+        </button>
+      </div>
+
+      <div v-if="filteredSyncQueueItems.length === 0" class="text-sm text-slate-500">
         No hay elementos en cola.
       </div>
 
       <ul v-else class="space-y-2">
         <li
-          v-for="item in syncQueueItems"
+          v-for="item in filteredSyncQueueItems"
           :key="item.id"
           class="rounded-lg border border-slate-200 p-3 bg-white"
         >
@@ -162,6 +179,7 @@ import { useSyncStore, type SyncKind } from '../stores/syncStore';
 
 const router = useRouter();
 const syncStore = useSyncStore();
+const queueFilter = ref<'all' | 'pending' | 'error'>('all');
 
 const movementFilter = ref<'all' | 'entrada' | 'salida'>('all');
 const registros = ref<Array<{
@@ -176,6 +194,11 @@ const movementOptions = [
   { label: 'Todos', value: 'all' },
   { label: 'Entrada', value: 'entrada' },
   { label: 'Salida', value: 'salida' }
+] as const;
+const queueFilterOptions = [
+  { label: 'Todos', value: 'all' },
+  { label: 'Pendientes', value: 'pending' },
+  { label: 'Errores', value: 'error' }
 ] as const;
 
 interface QueueRow {
@@ -193,6 +216,13 @@ const erroredSyncCount = computed(() => syncStore.queue.filter((q) => q.status =
 const syncQueueItems = computed<QueueRow[]>(() =>
   [...syncStore.queue].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
 );
+const filteredSyncQueueItems = computed(() => {
+  if (queueFilter.value === 'all') return syncQueueItems.value;
+  if (queueFilter.value === 'pending') {
+    return syncQueueItems.value.filter((q) => q.status === 'pending' || q.status === 'processing');
+  }
+  return syncQueueItems.value.filter((q) => q.status === 'error');
+});
 const syncStatusText = computed(() => {
   if (syncStore.connectivity === 'offline') return 'Sin conexión';
   if (pendingSyncCount.value > 0) return `Sincronizando pendientes (${pendingSyncCount.value})`;
@@ -309,5 +339,13 @@ function formatSyncDate(value: string): string {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
   return d.toLocaleString();
+}
+
+function queueFilterCount(filter: 'all' | 'pending' | 'error'): number {
+  if (filter === 'all') return syncQueueItems.value.length;
+  if (filter === 'pending') {
+    return syncQueueItems.value.filter((q) => q.status === 'pending' || q.status === 'processing').length;
+  }
+  return syncQueueItems.value.filter((q) => q.status === 'error').length;
 }
 </script>

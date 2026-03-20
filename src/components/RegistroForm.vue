@@ -968,19 +968,35 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
 
     const normalizedCanvas = trimBlackBorders(canvas);
 
-    // Compresión: exportamos como JPEG (en evidencia/Drive/Edge funciona perfecto).
-    // Calidad inicial, si se pasa de tamaño repetimos con menor calidad.
-    const maxBytes = 650 * 1024; // ~650KB por imagen (ajustable)
-    let quality = 0.82;
-    let dataUrl = normalizedCanvas.toDataURL('image/jpeg', quality);
+    // Compresión: JPEG con tope de peso por imagen.
+    // Estrategia: bajar calidad y, si aún pesa mucho, reducir resolución en pasos.
+    const maxBytes = 280 * 1024; // objetivo ~280KB por evidencia
+    const estimateBytes = (data: string) => Math.floor((data.length * 3) / 4);
 
-    const approxBytes = Math.floor((dataUrl.length * 3) / 4);
-    if (approxBytes > maxBytes) {
-      for (const q of [0.72, 0.62, 0.52]) {
-        quality = q;
-        dataUrl = normalizedCanvas.toDataURL('image/jpeg', quality);
-        const b = Math.floor((dataUrl.length * 3) / 4);
-        if (b <= maxBytes) break;
+    const encodeJpeg = (c: HTMLCanvasElement, q: number) => c.toDataURL('image/jpeg', q);
+
+    let workingCanvas = normalizedCanvas;
+    let dataUrl = encodeJpeg(workingCanvas, 0.8);
+
+    for (const quality of [0.8, 0.72, 0.64, 0.56, 0.48]) {
+      dataUrl = encodeJpeg(workingCanvas, quality);
+      if (estimateBytes(dataUrl) <= maxBytes) break;
+    }
+
+    // Si sigue pesado, reducimos resolución progresivamente.
+    for (const scale of [0.9, 0.8, 0.7, 0.6]) {
+      if (estimateBytes(dataUrl) <= maxBytes) break;
+      const resized = document.createElement('canvas');
+      resized.width = Math.max(1, Math.round(workingCanvas.width * scale));
+      resized.height = Math.max(1, Math.round(workingCanvas.height * scale));
+      const rctx = resized.getContext('2d');
+      if (!rctx) break;
+      rctx.drawImage(workingCanvas, 0, 0, resized.width, resized.height);
+      workingCanvas = resized;
+
+      for (const quality of [0.72, 0.64, 0.56, 0.48]) {
+        dataUrl = encodeJpeg(workingCanvas, quality);
+        if (estimateBytes(dataUrl) <= maxBytes) break;
       }
     }
 
