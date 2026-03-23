@@ -10,6 +10,7 @@ interface AuthState {
   loading: boolean;
   googleAccessToken: string | null;
   driveConfigReady: boolean;
+  driveConfigRetryScheduled: boolean;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
@@ -22,9 +23,80 @@ export const useAuthStore = defineStore('auth', {
     userId: localStorage.getItem(AUTH_CACHED_USER_ID_KEY),
     loading: false,
     googleAccessToken: null,
-    driveConfigReady: false
+    driveConfigReady: false,
+    driveConfigRetryScheduled: false
   }),
   actions: {
+    getProviderTokenFromSession(session: unknown): string | null {
+      const token = (session as any)?.provider_token;
+      return typeof token === 'string' && token.length > 0 ? token : null;
+    },
+    async getDriveConfigRow(userId: string) {
+      const { data, error } = await supabase
+        .from('user_drive_config')
+        .select('pdf_folder_id, images_folder_id')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (error) throw error;
+      return data;
+    },
+    scheduleDriveConfigRetry() {
+      if (this.driveConfigRetryScheduled) return;
+      this.driveConfigRetryScheduled = true;
+      const retry = () => {
+        window.removeEventListener('online', retry);
+        this.driveConfigRetryScheduled = false;
+        void this.ensureDriveConfigIfNeeded();
+      };
+      window.addEventListener('online', retry, { once: true });
+    },
+    async ensureDriveConfigIfNeeded() {
+      if (!this.userId) return;
+      try {
+        const existing = await this.getDriveConfigRow(this.userId);
+        if (existing) {
+          this.driveConfigReady = true;
+          return;
+        }
+      } catch (e) {
+        console.error('Error consultando user_drive_config:', e);
+      }
+
+      let token = this.googleAccessToken;
+      if (!token) {
+        const {
+          data: { session }
+        } = await supabase.auth.getSession();
+        token = this.getProviderTokenFromSession(session);
+      }
+
+      // En algunas restauraciones de sesión en móvil, provider_token no llega.
+      // Intentamos refrescar sesión una vez para recuperarlo.
+      if (!token) {
+        try {
+          const { data: refreshed } = await supabase.auth.refreshSession();
+          token = this.getProviderTokenFromSession(refreshed?.session);
+        } catch (e) {
+          console.error('Error refrescando sesión para token Google:', e);
+        }
+      }
+
+      if (!token) {
+        this.driveConfigReady = false;
+        this.scheduleDriveConfigRetry();
+        return;
+      }
+
+      this.googleAccessToken = token;
+      try {
+        await this.ensureUserDriveConfig(token);
+      } catch (e) {
+        console.error('Error asegurando configuración Drive:', e);
+        this.driveConfigReady = false;
+        this.scheduleDriveConfigRetry();
+      }
+    },
     async initSession() {
       this.loading = true;
       this.driveConfigReady = false;
@@ -47,17 +119,7 @@ export const useAuthStore = defineStore('auth', {
           // @ts-expect-error provider_token existe en la sesión cuando el proveedor es OAuth (Google)
           const token = (session as any).provider_token ?? null;
           this.googleAccessToken = token;
-
-          // Crear carpetas en Drive automáticamente si aún no tiene config.
-          // Importante: si falla (CORS/Google OAuth en móvil), NO debemos marcar al usuario como no logueado.
-          if (token) {
-            try {
-              await this.ensureUserDriveConfig(token);
-            } catch (e) {
-              console.error('Error creando configuración Drive:', e);
-              this.driveConfigReady = false;
-            }
-          }
+          await this.ensureDriveConfigIfNeeded();
         } else {
           this.isSignedIn = false;
           this.userId = null;
@@ -72,6 +134,9 @@ export const useAuthStore = defineStore('auth', {
         // En modo offline mantenemos cache de identidad para permitir cola local.
         this.isSignedIn = !!this.userId;
         this.googleAccessToken = null;
+        if (this.userId) {
+          this.scheduleDriveConfigRetry();
+        }
       } finally {
         this.loading = false;
       }
@@ -87,11 +152,7 @@ export const useAuthStore = defineStore('auth', {
       const userId = session?.user?.id;
       if (!userId) return;
 
-      const { data: existing } = await supabase
-        .from('user_drive_config')
-        .select('pdf_folder_id, images_folder_id')
-        .eq('user_id', userId)
-        .maybeSingle();
+      const existing = await this.getDriveConfigRow(userId);
 
       if (existing) {
         this.driveConfigReady = true;
