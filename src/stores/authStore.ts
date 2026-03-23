@@ -6,16 +6,20 @@ interface AuthState {
   isSignedIn: boolean;
   email: string | null;
   displayName: string | null;
+  userId: string | null;
   loading: boolean;
   googleAccessToken: string | null;
   driveConfigReady: boolean;
 }
+
+const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
 
 export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
     isSignedIn: false,
     email: null,
     displayName: null,
+    userId: localStorage.getItem(AUTH_CACHED_USER_ID_KEY),
     loading: false,
     googleAccessToken: null,
     driveConfigReady: false
@@ -31,11 +35,15 @@ export const useAuthStore = defineStore('auth', {
 
         if (session?.user) {
           this.isSignedIn = true;
+          this.userId = session.user.id ?? null;
           this.email = session.user.email ?? null;
           this.displayName =
             (session.user.user_metadata?.full_name as string | undefined) ??
             (session.user.user_metadata?.name as string | undefined) ??
             this.email;
+          if (this.userId) {
+            localStorage.setItem(AUTH_CACHED_USER_ID_KEY, this.userId);
+          }
           // @ts-expect-error provider_token existe en la sesión cuando el proveedor es OAuth (Google)
           const token = (session as any).provider_token ?? null;
           this.googleAccessToken = token;
@@ -52,16 +60,17 @@ export const useAuthStore = defineStore('auth', {
           }
         } else {
           this.isSignedIn = false;
+          this.userId = null;
           this.email = null;
           this.displayName = null;
           this.googleAccessToken = null;
+          localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
         }
       } catch (e) {
         // Si falla por CORS/red, no dejamos la UI bloqueada en loading.
         console.error('Error initSession:', e);
-        this.isSignedIn = false;
-        this.email = null;
-        this.displayName = null;
+        // En modo offline mantenemos cache de identidad para permitir cola local.
+        this.isSignedIn = !!this.userId;
         this.googleAccessToken = null;
       } finally {
         this.loading = false;
@@ -166,9 +175,11 @@ export const useAuthStore = defineStore('auth', {
     async signOut() {
       await supabase.auth.signOut();
       this.isSignedIn = false;
+      this.userId = null;
       this.email = null;
       this.displayName = null;
       this.googleAccessToken = null;
+      localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
     }
   }
 });

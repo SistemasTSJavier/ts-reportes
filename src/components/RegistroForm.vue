@@ -537,6 +537,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { VueSignaturePad } from 'vue-signature-pad';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { useAuthStore } from '../stores/authStore';
 import { useToastStore } from '../stores/toastStore';
 import { useSyncStore } from '../stores/syncStore';
 import ImagePicker from './ImagePicker.vue';
@@ -591,6 +592,7 @@ interface RegistroFormModel {
 
 const syncStore = useSyncStore();
 const toastStore = useToastStore();
+const authStore = useAuthStore();
 const router = useRouter();
 
 const checklistTractoItems = [
@@ -1044,13 +1046,15 @@ function clearFirmaOficial() {
 async function persistRegistro() {
   saving.value = true;
 
-  const { data: authData } = await supabase.auth.getUser();
-  const userId = authData.user?.id ?? null;
+  const {
+    data: { session }
+  } = await supabase.auth.getSession();
+  const userId = session?.user?.id ?? authStore.userId ?? null;
   if (!userId) {
     saving.value = false;
     toastStore.error(
       'No se pudo guardar',
-      'No hay sesión activa. Inicia sesión nuevamente con Google.'
+      'No hay sesión activa para guardar offline. Inicia sesión con Google una vez con internet.'
     );
     return;
   }
