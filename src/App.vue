@@ -59,18 +59,22 @@
 <script setup lang="ts">
 import { onMounted } from 'vue';
 import { useAuthStore } from './stores/authStore';
+import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
 import ToastContainer from './components/ToastContainer.vue';
 
 const auth = useAuthStore();
 const sync = useSyncStore();
+const pwa = usePwaStore();
 
 onMounted(() => {
+  pwa.init();
   void auth.initSession();
   void (async () => {
     await sync.loadFromStorage();
     sync.attachOnlineListener();
     sync.attachLifecycleListeners();
+    sync.attachPeriodicSync(45000);
     if (navigator.onLine) {
       await sync.processQueue();
     }

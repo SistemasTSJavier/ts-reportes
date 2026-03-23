@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ts-reportes-static-v1';
+const CACHE_NAME = 'ts-reportes-static-v2';
 const APP_SHELL = ['/', '/index.html', '/logo.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -29,23 +29,53 @@ self.addEventListener('fetch', (event) => {
   // SPA navigation fallback
   if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(request).catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', copy));
+          return response;
+        })
+        .catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
     );
     return;
   }
 
-  // Static assets: cache-first
+  // Archivos estáticos del mismo origen: stale-while-revalidate.
+  const isStaticAsset = /\.(js|css|png|jpg|jpeg|svg|ico|webp|woff2?)$/i.test(url.pathname);
+  if (isStaticAsset) {
+    event.respondWith(
+      caches.match(request).then((cached) => {
+        const fetchPromise = fetch(request)
+          .then((networkRes) => {
+            if (networkRes && networkRes.status === 200) {
+              const copy = networkRes.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            }
+            return networkRes;
+          })
+          .catch(() => cached);
+
+        return cached || fetchPromise;
+      })
+    );
+    return;
+  }
+
+  // Para GETs del mismo origen no estáticos: network-first con fallback a caché.
   event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached;
-      return fetch(request)
-        .then((networkRes) => {
-          if (!networkRes || networkRes.status !== 200) return networkRes;
+    fetch(request)
+      .then((networkRes) => {
+        if (networkRes && networkRes.status === 200) {
           const copy = networkRes.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-          return networkRes;
+        }
+        return networkRes;
+      })
+      .catch(() =>
+        caches.match(request).then((cached) => {
+          if (cached) return cached;
+          return caches.match('/index.html');
         })
-        .catch(() => caches.match('/index.html'));
-    })
+      )
   );
 });

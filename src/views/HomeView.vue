@@ -34,6 +34,23 @@
         >
           Reintentar sincronización ({{ erroredSyncCount }})
         </button>
+        <button
+          v-if="pwa.isInstallable && !pwa.isStandalone"
+          type="button"
+          class="text-xs text-emerald-700 font-semibold hover:underline"
+          @click="installPwa"
+        >
+          Instalar app en Android
+        </button>
+        <button
+          v-if="syncQueueItems.length > 0"
+          type="button"
+          class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
+          :disabled="syncStore.syncing || syncStore.connectivity === 'offline'"
+          @click="syncNow"
+        >
+          {{ syncStore.syncing ? 'Sincronizando...' : 'Sincronizar ahora' }}
+        </button>
         <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
           <button
             v-for="opt in movementOptions"
@@ -175,10 +192,14 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
+import { useToastStore } from '../stores/toastStore';
 
 const router = useRouter();
 const syncStore = useSyncStore();
+const pwa = usePwaStore();
+const toastStore = useToastStore();
 const queueFilter = ref<'all' | 'pending' | 'error'>('all');
 
 const movementFilter = ref<'all' | 'entrada' | 'salida'>('all');
@@ -309,6 +330,21 @@ function goNew() {
 
 function retrySyncErrors() {
   void syncStore.retryErroredItems();
+}
+
+async function installPwa() {
+  const outcome = await pwa.promptInstall();
+  if (outcome === 'accepted') {
+    toastStore.success('App instalada', 'Ya puedes abrirla desde tu pantalla de inicio.');
+    return;
+  }
+  if (outcome === 'dismissed') {
+    toastStore.info('Instalación cancelada', 'Puedes intentarlo nuevamente cuando quieras.');
+  }
+}
+
+function syncNow() {
+  void syncStore.processQueue();
 }
 
 function clearSyncErrors() {

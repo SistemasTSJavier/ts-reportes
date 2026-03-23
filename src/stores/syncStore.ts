@@ -32,6 +32,7 @@ interface SyncState {
   connectivity: 'online' | 'offline';
   retryAttempt: number;
   retryTimerId: number | null;
+  periodicSyncTimerId: number | null;
 }
 
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
@@ -110,7 +111,8 @@ export const useSyncStore = defineStore('sync', {
     history: [],
     connectivity: navigator.onLine ? 'online' : 'offline',
     retryAttempt: 0,
-    retryTimerId: null
+    retryTimerId: null,
+    periodicSyncTimerId: null
   }),
   actions: {
     clearRetryTimer() {
@@ -202,6 +204,10 @@ export const useSyncStore = defineStore('sync', {
     enqueueGeneratePdf(payload: GeneratePdfPayload) {
       const now = new Date().toISOString();
       const id = `pdf_${payload.registroId}`;
+      const alreadyQueued = this.queue.some((q) => q.id === id && q.status !== 'done');
+      if (alreadyQueued) {
+        return;
+      }
       const item: SyncItem = {
         id,
         kind: 'generate_pdf',
@@ -409,7 +415,7 @@ export const useSyncStore = defineStore('sync', {
         this.connectivity = 'offline';
       });
       window.addEventListener('online', () => {
-        this.connectivity = 'online';
+        void this.updateConnectivity();
         this.retryAttempt = 0;
         void this.processQueue();
       });
@@ -423,6 +429,16 @@ export const useSyncStore = defineStore('sync', {
       });
       window.addEventListener('focus', trigger);
       window.addEventListener('pageshow', trigger);
+    },
+    attachPeriodicSync(intervalMs = 45000) {
+      if (this.periodicSyncTimerId != null) {
+        window.clearInterval(this.periodicSyncTimerId);
+      }
+      this.periodicSyncTimerId = window.setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        if (!navigator.onLine) return;
+        void this.processQueue();
+      }, intervalMs);
     }
   }
 });
