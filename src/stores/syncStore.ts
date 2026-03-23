@@ -122,17 +122,28 @@ export const useSyncStore = defineStore('sync', {
       }
     },
     async updateConnectivity() {
-      if (!navigator.onLine) {
-        this.connectivity = 'offline';
+      // Híbrido para Android/PWA: `navigator.onLine` puede quedar desfasado.
+      // 1) Si el SO reporta online, tomamos online.
+      if (navigator.onLine) {
+        this.connectivity = 'online';
         return;
       }
+
+      // 2) Si reporta offline, validamos reachability real a Supabase con timeout.
+      // Esto destraba casos donde el navegador marca offline erróneamente.
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 4000);
       try {
         const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/auth/v1/health`, {
-          method: 'GET'
+          method: 'GET',
+          cache: 'no-store',
+          signal: controller.signal
         });
         this.connectivity = res.ok ? 'online' : 'offline';
       } catch {
         this.connectivity = 'offline';
+      } finally {
+        window.clearTimeout(timer);
       }
     },
     scheduleRetry() {
@@ -436,7 +447,7 @@ export const useSyncStore = defineStore('sync', {
       }
       this.periodicSyncTimerId = window.setInterval(() => {
         if (document.visibilityState !== 'visible') return;
-        if (!navigator.onLine) return;
+        // Intentamos siempre; processQueue decide según `updateConnectivity`.
         void this.processQueue();
       }, intervalMs);
     }
