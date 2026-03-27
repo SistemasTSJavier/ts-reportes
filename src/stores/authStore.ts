@@ -20,6 +20,9 @@ interface AuthState {
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
+/** Supabase a veces omite `provider_token` tras refresh; respaldo solo para el mismo usuario. */
+const GOOGLE_PROVIDER_TOKEN_KEY = 'ts_google_provider_token_v1';
+const GOOGLE_PROVIDER_TOKEN_UID_KEY = 'ts_google_provider_token_uid_v1';
 
 /** Normaliza metadata/BD al nombre de archivo en public/ y en assets del PDF */
 export function normalizeServiceLogoFile(v: string | null): string {
@@ -74,9 +77,15 @@ export const useAuthStore = defineStore('auth', {
           return;
         }
         const s = data.session;
+        const uid = s.user?.id ?? before.user?.id;
         // @ts-expect-error provider_token OAuth
         const google = (s as any).provider_token ?? (before as any).provider_token;
-        this.googleAccessToken = typeof google === 'string' && google.length > 0 ? google : null;
+        const merged =
+          typeof google === 'string' && google.length > 0
+            ? google
+            : this.getGoogleProviderTokenFallback(uid ?? undefined);
+        this.googleAccessToken = merged ?? null;
+        if (merged && uid) this.rememberGoogleProviderToken(uid, merged);
       } catch (e) {
         console.error('refreshSessionOnForeground', e);
         this.requireSessionRestart();
@@ -88,6 +97,25 @@ export const useAuthStore = defineStore('auth', {
     getProviderTokenFromSession(session: unknown): string | null {
       const token = (session as any)?.provider_token;
       return typeof token === 'string' && token.length > 0 ? token : null;
+    },
+    /** Guarda el token de Google OAuth para Drive cuando la sesión ya no lo trae (p. ej. tras refreshSession). */
+    rememberGoogleProviderToken(userId: string | null | undefined, token: string | null | undefined) {
+      if (!userId) return;
+      if (typeof token === 'string' && token.length > 0) {
+        localStorage.setItem(GOOGLE_PROVIDER_TOKEN_UID_KEY, userId);
+        localStorage.setItem(GOOGLE_PROVIDER_TOKEN_KEY, token);
+      }
+    },
+    getGoogleProviderTokenFallback(userId: string | null | undefined): string | null {
+      if (!userId) return null;
+      const uid = localStorage.getItem(GOOGLE_PROVIDER_TOKEN_UID_KEY);
+      const t = localStorage.getItem(GOOGLE_PROVIDER_TOKEN_KEY);
+      if (uid === userId && typeof t === 'string' && t.length > 0) return t;
+      return null;
+    },
+    clearGoogleProviderTokenCache() {
+      localStorage.removeItem(GOOGLE_PROVIDER_TOKEN_KEY);
+      localStorage.removeItem(GOOGLE_PROVIDER_TOKEN_UID_KEY);
     },
     async getDriveConfigRow(userId: string) {
       const { data, error } = await supabase
@@ -175,9 +203,12 @@ export const useAuthStore = defineStore('auth', {
           if (this.userId) {
             localStorage.setItem(AUTH_CACHED_USER_ID_KEY, this.userId);
           }
-          // @ts-expect-error provider_token existe en la sesión cuando el proveedor es OAuth (Google)
-          const token = (session as any).provider_token ?? null;
-          this.googleAccessToken = token;
+          const uid = session.user.id ?? null;
+          const fromSession = this.getProviderTokenFromSession(session);
+          const token =
+            fromSession ?? this.getGoogleProviderTokenFallback(uid ?? undefined);
+          this.googleAccessToken = typeof token === 'string' && token.length > 0 ? token : null;
+          if (fromSession && uid) this.rememberGoogleProviderToken(uid, fromSession);
           await this.ensureDriveConfigIfNeeded();
           if (!this.serviceLogoFile && session.user) {
             const meta = (session.user.user_metadata ?? {}) as Record<string, unknown>;
@@ -199,6 +230,7 @@ export const useAuthStore = defineStore('auth', {
           this.googleAccessToken = null;
           this.serviceLogoFile = null;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
+          this.clearGoogleProviderTokenCache();
         }
       } catch (e) {
         // Si falla por CORS/red, no dejamos la UI bloqueada en loading.
@@ -307,6 +339,7 @@ export const useAuthStore = defineStore('auth', {
       this.serviceLogoFile = null;
       this.sessionRestartRequired = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
+      this.clearGoogleProviderTokenCache();
     }
   }
 });

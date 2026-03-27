@@ -261,12 +261,21 @@ export const useSyncStore = defineStore('sync', {
           return;
         }
 
-        // Tras refresh, a veces falta provider_token; conservamos el de la sesión anterior.
+        // Tras refresh, a veces falta provider_token; conservamos el de la sesión anterior y caché local (mismo user).
         // @ts-expect-error provider_token OAuth
         const googleFromRefresh: string | undefined = (session as any)?.provider_token;
         // @ts-expect-error provider_token OAuth
         const googleFromInitial: string | undefined = (sessionInitial as any)?.provider_token;
-        const accessToken: string | undefined = googleFromRefresh ?? googleFromInitial;
+        const authStore = useAuthStore();
+        const uid = session.user?.id;
+        const accessToken: string | undefined =
+          googleFromRefresh ??
+          googleFromInitial ??
+          authStore.getGoogleProviderTokenFallback(uid) ??
+          undefined;
+        if (accessToken && uid) {
+          authStore.rememberGoogleProviderToken(uid, accessToken);
+        }
 
         // JWT de Supabase del usuario autenticado (necesario para que la Edge Function autorice la llamada)
         const supabaseAccessTokenCandidate: unknown =
@@ -295,7 +304,7 @@ export const useSyncStore = defineStore('sync', {
             if (item.kind === 'generate_pdf') {
               if (!accessToken) {
                 throw new Error(
-                  'No hay token de Google disponible (provider_token). Cierra sesión y vuelve a iniciar con Google.'
+                  'No hay token de Google para Drive. Cierra sesión y vuelve a iniciar con Google y acepta el acceso a Google Drive.'
                 );
               }
               if (!supabaseAccessToken) {
@@ -366,7 +375,7 @@ export const useSyncStore = defineStore('sync', {
               // 3) Generar PDF (Edge Function) usando el token Google
               if (!accessToken) {
                 throw new Error(
-                  'Registro creado pero falta token Google (provider_token). Reintenta iniciando sesión con Google.'
+                  'Registro creado pero falta token de Google para Drive. Cierra sesión, inicia de nuevo con Google y acepta el acceso a Drive.'
                 );
               }
               if (!supabaseAccessToken) {
