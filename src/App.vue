@@ -53,6 +53,17 @@
     <main class="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
       <router-view />
     </main>
+
+    <footer class="border-t border-slate-200 bg-white">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 py-4 text-xs text-slate-600">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <router-link to="/privacidad" class="hover:text-tactical-blue">Política de Privacidad</router-link>
+          <router-link to="/terminos" class="hover:text-tactical-blue">Términos y Condiciones</router-link>
+          <router-link to="/seguridad-soporte" class="hover:text-tactical-blue">Seguridad y Soporte</router-link>
+        </div>
+        <p class="mt-2">Tactical Support</p>
+      </div>
+    </footer>
   </div>
 </template>
 
