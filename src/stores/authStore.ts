@@ -13,6 +13,10 @@ interface AuthState {
   driveConfigRetryScheduled: boolean;
   /** Nombre de archivo del logo de servicio (p. ej. danfoss.png), desde user_drive_config */
   serviceLogoFile: string | null;
+  /**
+   * Si es true, el JWT ya no es válido y hay que recargar la página (no basta con navegar en la SPA).
+   */
+  sessionRestartRequired: boolean;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
@@ -39,9 +43,48 @@ export const useAuthStore = defineStore('auth', {
     googleAccessToken: null,
     driveConfigReady: false,
     driveConfigRetryScheduled: false,
-    serviceLogoFile: null
+    serviceLogoFile: null,
+    sessionRestartRequired: false
   }),
   actions: {
+    requireSessionRestart() {
+      this.sessionRestartRequired = true;
+    },
+    clearSessionRestartRequired() {
+      this.sessionRestartRequired = false;
+    },
+    /**
+     * Al volver a la pestaña / primer plano: renueva el JWT para evitar 401.
+     * Si falla, obliga a reiniciar la app (recarga).
+     */
+    async refreshSessionOnForeground() {
+      if (!this.isSignedIn || this.sessionRestartRequired) return;
+      try {
+        const {
+          data: { session: before }
+        } = await supabase.auth.getSession();
+        if (!before?.user) {
+          this.requireSessionRestart();
+          return;
+        }
+        const { data, error } = await supabase.auth.refreshSession();
+        if (error || !data.session?.user) {
+          console.warn('refreshSessionOnForeground:', error?.message ?? 'sin sesión');
+          this.requireSessionRestart();
+          return;
+        }
+        const s = data.session;
+        // @ts-expect-error provider_token OAuth
+        const google = (s as any).provider_token ?? (before as any).provider_token;
+        this.googleAccessToken = typeof google === 'string' && google.length > 0 ? google : null;
+      } catch (e) {
+        console.error('refreshSessionOnForeground', e);
+        this.requireSessionRestart();
+      }
+    },
+    reloadApp() {
+      window.location.reload();
+    },
     getProviderTokenFromSession(session: unknown): string | null {
       const token = (session as any)?.provider_token;
       return typeof token === 'string' && token.length > 0 ? token : null;
@@ -262,6 +305,7 @@ export const useAuthStore = defineStore('auth', {
       this.displayName = null;
       this.googleAccessToken = null;
       this.serviceLogoFile = null;
+      this.sessionRestartRequired = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
     }
   }

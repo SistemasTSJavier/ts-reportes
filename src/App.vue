@@ -2,6 +2,35 @@
   <div class="min-h-screen flex flex-col bg-slate-50">
     <ToastContainer />
 
+    <!-- Sesión irreparable: solo recarga completa (evita 401 JWT en llamadas sueltas) -->
+    <div
+      v-if="auth.sessionRestartRequired"
+      class="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-900/90 backdrop-blur-sm"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="session-restart-title"
+    >
+      <div class="max-w-md w-full rounded-xl bg-white shadow-xl p-6 space-y-4 text-center">
+        <h2 id="session-restart-title" class="text-lg font-bold text-slate-900">
+          Reiniciar la aplicación
+        </h2>
+        <p class="text-sm text-slate-600 leading-relaxed">
+          La sesión de seguridad ya no es válida o se interrumpió al dejar el navegador mucho tiempo en
+          segundo plano. Para seguir usando Tactical Support debes reiniciar la aplicación web.
+        </p>
+        <p class="text-xs text-slate-500">
+          No es posible continuar sin recargar: así se obtienen de nuevo credenciales seguras.
+        </p>
+        <button
+          type="button"
+          class="btn-primary w-full py-3 text-base font-semibold"
+          @click="auth.reloadApp"
+        >
+          Reiniciar aplicación
+        </button>
+      </div>
+    </div>
+
     <header class="bg-white border-b border-slate-200/80 shadow-card sticky top-0 z-10">
       <div class="max-w-4xl mx-auto px-4 sm:px-6">
         <div class="flex items-center justify-between h-16">
@@ -68,19 +97,43 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onBeforeUnmount, onMounted } from 'vue';
 import { useAuthStore } from './stores/authStore';
 import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
 import ToastContainer from './components/ToastContainer.vue';
+import { supabase } from './supabaseClient';
 
 const auth = useAuthStore();
 const sync = useSyncStore();
 const pwa = usePwaStore();
 
+function onReturnToForeground() {
+  if (document.visibilityState !== 'visible') return;
+  if (auth.sessionRestartRequired) return;
+  void auth.refreshSessionOnForeground();
+}
+
+let authSubscription: { unsubscribe: () => void } | null = null;
+
 onMounted(() => {
   pwa.init();
   void auth.initSession();
+
+  document.addEventListener('visibilitychange', onReturnToForeground);
+  window.addEventListener('focus', onReturnToForeground);
+  window.addEventListener('pageshow', onReturnToForeground);
+
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    if (auth.sessionRestartRequired) return;
+    if (event === 'TOKEN_REFRESHED' && session) {
+      // @ts-expect-error provider_token OAuth
+      const pt = (session as any).provider_token;
+      if (typeof pt === 'string' && pt.length) auth.googleAccessToken = pt;
+    }
+  });
+  authSubscription = data.subscription;
+
   void (async () => {
     await sync.loadFromStorage();
     sync.attachOnlineListener();
@@ -90,5 +143,12 @@ onMounted(() => {
       await sync.processQueue();
     }
   })();
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onReturnToForeground);
+  window.removeEventListener('focus', onReturnToForeground);
+  window.removeEventListener('pageshow', onReturnToForeground);
+  authSubscription?.unsubscribe();
 });
 </script>

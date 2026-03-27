@@ -34,6 +34,31 @@ interface UserDriveConfigRow {
   service_logo_file: string | null;
 }
 
+/** Alineado con la PWA (authStore): metadata → nombre de archivo en Storage */
+function normalizeServiceLogoFile(v: string | null | undefined): string {
+  if (!v) return 'caterpillar.png';
+  const s = v.toString().toLowerCase();
+  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return v.toString();
+  if (s.includes('caterpillar')) return 'caterpillar.png';
+  if (s.includes('komatsu')) return 'komatsu.png';
+  if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
+  if (s.includes('danfoss')) return 'danfoss.png';
+  return 'caterpillar.png';
+}
+
+function logoFromUserMetadata(meta: Record<string, unknown> | undefined): string | null {
+  if (!meta) return null;
+  const raw =
+    (meta.service_logo_file as string | undefined) ??
+    (meta.service_logo as string | undefined) ??
+    (meta.service_code as string | undefined) ??
+    (meta.service as string | undefined) ??
+    null;
+  if (!raw || typeof raw !== 'string') return null;
+  const t = raw.trim();
+  return t.length ? t : null;
+}
+
 function decodeJwtSub(authorizationHeader: string | null): string | null {
   if (!authorizationHeader) return null;
   const token = authorizationHeader.startsWith('Bearer ')
@@ -383,7 +408,19 @@ function drawEvidenceImageWithOrientation(
   });
 }
 
-async function buildPdf(registro: RegistroRow, logoCenterFile?: string | null): Promise<Uint8Array> {
+type SupabaseForStorage = {
+  storage: {
+    from: (bucket: string) => {
+      download: (path: string) => Promise<{ data: Blob | null; error: Error | null }>;
+    };
+  };
+};
+
+async function buildPdf(
+  registro: RegistroRow,
+  logoCenterFile?: string | null,
+  supabaseStorage?: SupabaseForStorage
+): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
 
   const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -465,6 +502,19 @@ async function buildPdf(registro: RegistroRow, logoCenterFile?: string | null): 
         }
       } catch (e) {
         console.warn('loadImage fetch failed:', path, e);
+      }
+    }
+
+    // 1b) Service role: descarga desde Storage (bucket privado o fallo de URL pública)
+    if (supabaseStorage) {
+      try {
+        const { data: blob, error: dlErr } = await supabaseStorage.storage.from(LOGO_BUCKET).download(path);
+        if (!dlErr && blob) {
+          const buf = await blob.arrayBuffer();
+          return await tryEmbed(new Uint8Array(buf));
+        }
+      } catch (e) {
+        console.warn('loadImage storage.download failed:', path, e);
       }
     }
 
@@ -1959,6 +2009,9 @@ Deno.serve(async (req) => {
       });
     }
 
+    const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
+    const userMeta = authUserRow?.user?.user_metadata as Record<string, unknown> | undefined;
+
     const { data: driveCfg, error: driveCfgError } = await supabaseServer
       .from('user_drive_config')
       .select('pdf_folder_id, images_folder_id, service_logo_file')
@@ -1975,7 +2028,8 @@ Deno.serve(async (req) => {
         .insert({
           user_id: data.user_id,
           pdf_folder_id: pdfFolderId,
-          images_folder_id: imagesFolderId
+          images_folder_id: imagesFolderId,
+          service_logo_file: normalizeServiceLogoFile(logoFromUserMetadata(userMeta))
         })
         .select('pdf_folder_id, images_folder_id, service_logo_file')
         .single<UserDriveConfigRow>();
@@ -1992,7 +2046,15 @@ Deno.serve(async (req) => {
       }
     }
 
-    const pdfBytes = await buildPdf(data, finalDriveCfg?.service_logo_file);
+    // Misma prioridad que la PWA: BD primero; si no hay logo en fila, user_metadata (Auth).
+    const resolvedCenterLogo = (() => {
+      const d = finalDriveCfg?.service_logo_file?.trim();
+      if (d) return d;
+      const m = logoFromUserMetadata(userMeta);
+      return m ? normalizeServiceLogoFile(m) : null;
+    })();
+
+    const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer);
     const rawFolioFile = (data.folio_pdf ?? '').toString().trim();
     const mFile = rawFolioFile.match(/^TS-0*(\d+)$/i);
     const folioNumFile = mFile ? Number(mFile[1]) : null;

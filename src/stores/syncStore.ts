@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
+import { useAuthStore } from './authStore';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -230,6 +231,7 @@ export const useSyncStore = defineStore('sync', {
       void this.persist();
     },
     async processQueue() {
+      if (useAuthStore().sessionRestartRequired) return;
       if (this.syncing || this.queue.length === 0) return;
       await this.updateConnectivity();
       if (this.connectivity !== 'online') return;
@@ -243,10 +245,29 @@ export const useSyncStore = defineStore('sync', {
 
       try {
         const {
-          data: { session }
+          data: { session: sessionInitial }
         } = await supabase.auth.getSession();
-        // @ts-expect-error provider_token está presente cuando el proveedor es OAuth (Google)
-        const accessToken: string | undefined = (session as any)?.provider_token;
+
+        // Renovar JWT de Supabase: si el access_token expiró, getSession() devuelve uno viejo y la API responde 401 Invalid JWT.
+        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+        if (refreshErr) {
+          console.warn('syncStore: refreshSession', refreshErr.message);
+          useAuthStore().requireSessionRestart();
+          return;
+        }
+        const session = refreshed.session ?? sessionInitial;
+        if (!session) {
+          useAuthStore().requireSessionRestart();
+          return;
+        }
+
+        // Tras refresh, a veces falta provider_token; conservamos el de la sesión anterior.
+        // @ts-expect-error provider_token OAuth
+        const googleFromRefresh: string | undefined = (session as any)?.provider_token;
+        // @ts-expect-error provider_token OAuth
+        const googleFromInitial: string | undefined = (sessionInitial as any)?.provider_token;
+        const accessToken: string | undefined = googleFromRefresh ?? googleFromInitial;
+
         // JWT de Supabase del usuario autenticado (necesario para que la Edge Function autorice la llamada)
         const supabaseAccessTokenCandidate: unknown =
           (session as any)?.access_token ??
