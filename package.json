@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx,.vue --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write ."
@@ -13,20 +13,20 @@
     "@supabase/supabase-js": "^2.48.0",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
+    "@vitejs/plugin-vue": "^5.1.4",
     "pinia": "^2.2.6",
+    "vite": "^5.4.11",
     "vue": "^3.5.11",
     "vue-router": "^4.4.5",
     "vue-signature-pad": "^3.0.2"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.1.4",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.13.0",
     "eslint-plugin-vue": "^9.30.0",
     "postcss": "^8.4.47",
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.13",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "typescript": "^5.6.3"
   }
 }
