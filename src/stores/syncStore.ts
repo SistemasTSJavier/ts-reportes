@@ -307,6 +307,7 @@ export const useSyncStore = defineStore('sync', {
               }
 
               item.status = 'done';
+              item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
               this.history.unshift({ ...item });
               hadSuccess = true;
@@ -376,6 +377,7 @@ export const useSyncStore = defineStore('sync', {
               }
 
               item.status = 'done';
+              item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
               this.history.unshift({
                 ...item,

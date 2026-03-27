@@ -11,9 +11,23 @@ interface AuthState {
   googleAccessToken: string | null;
   driveConfigReady: boolean;
   driveConfigRetryScheduled: boolean;
+  /** Nombre de archivo del logo de servicio (p. ej. danfoss.png), desde user_drive_config */
+  serviceLogoFile: string | null;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
+
+/** Normaliza metadata/BD al nombre de archivo en public/ y en assets del PDF */
+export function normalizeServiceLogoFile(v: string | null): string {
+  if (!v) return 'caterpillar.png';
+  const s = v.toString().toLowerCase();
+  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return v.toString();
+  if (s.includes('caterpillar')) return 'caterpillar.png';
+  if (s.includes('komatsu')) return 'komatsu.png';
+  if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
+  if (s.includes('danfoss')) return 'danfoss.png';
+  return 'caterpillar.png';
+}
 
 export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
@@ -24,7 +38,8 @@ export const useAuthStore = defineStore('auth', {
     loading: false,
     googleAccessToken: null,
     driveConfigReady: false,
-    driveConfigRetryScheduled: false
+    driveConfigRetryScheduled: false,
+    serviceLogoFile: null
   }),
   actions: {
     getProviderTokenFromSession(session: unknown): string | null {
@@ -34,7 +49,7 @@ export const useAuthStore = defineStore('auth', {
     async getDriveConfigRow(userId: string) {
       const { data, error } = await supabase
         .from('user_drive_config')
-        .select('pdf_folder_id, images_folder_id')
+        .select('pdf_folder_id, images_folder_id, service_logo_file')
         .eq('user_id', userId)
         .maybeSingle();
 
@@ -57,6 +72,7 @@ export const useAuthStore = defineStore('auth', {
         const existing = await this.getDriveConfigRow(this.userId);
         if (existing) {
           this.driveConfigReady = true;
+          this.serviceLogoFile = existing.service_logo_file ?? null;
           return;
         }
       } catch (e) {
@@ -120,12 +136,25 @@ export const useAuthStore = defineStore('auth', {
           const token = (session as any).provider_token ?? null;
           this.googleAccessToken = token;
           await this.ensureDriveConfigIfNeeded();
+          if (!this.serviceLogoFile && session.user) {
+            const meta = (session.user.user_metadata ?? {}) as Record<string, unknown>;
+            const candidate =
+              (meta.service_logo_file as string | undefined) ??
+              (meta.service_logo as string | undefined) ??
+              (meta.service_code as string | undefined) ??
+              (meta.service as string | undefined) ??
+              null;
+            if (candidate) {
+              this.serviceLogoFile = normalizeServiceLogoFile(candidate);
+            }
+          }
         } else {
           this.isSignedIn = false;
           this.userId = null;
           this.email = null;
           this.displayName = null;
           this.googleAccessToken = null;
+          this.serviceLogoFile = null;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
         }
       } catch (e) {
@@ -175,26 +204,18 @@ export const useAuthStore = defineStore('auth', {
           (meta.service as string | undefined) ??
           null;
 
-        const normalizeLogoFile = (v: string | null): string => {
-          if (!v) return 'caterpillar.png';
-          const s = v.toString().toLowerCase();
-          // Si ya viene como nombre de archivo
-          if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return v.toString();
-          if (s.includes('caterpillar')) return 'caterpillar.png';
-          if (s.includes('komatsu')) return 'komatsu.png';
-          if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
-          return 'caterpillar.png';
-        };
+        const logoFile = normalizeServiceLogoFile(candidate);
 
         const { error } = await supabase.from('user_drive_config').insert({
           user_id: userId,
           pdf_folder_id: pdfFolderId,
           images_folder_id: imagesFolderId,
-          service_logo_file: normalizeLogoFile(candidate)
+          service_logo_file: logoFile
         });
 
         if (error) throw error;
         this.driveConfigReady = true;
+        this.serviceLogoFile = logoFile;
       } catch (e) {
         console.error('Error creando carpetas en Drive:', e);
         this.driveConfigReady = false;
@@ -240,6 +261,7 @@ export const useAuthStore = defineStore('auth', {
       this.email = null;
       this.displayName = null;
       this.googleAccessToken = null;
+      this.serviceLogoFile = null;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
     }
   }
