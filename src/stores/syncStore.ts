@@ -41,6 +41,11 @@ const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
 const IDB_NAME = 'ts_ctpat_sync_db_v1';
 const IDB_STORE = 'kv';
 
+/** IndexedDB no puede clonar Proxies (estado reactivo de Pinia/Vue). */
+function cloneForIndexedDb<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 function openSyncDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_NAME, 1);
@@ -171,14 +176,14 @@ export const useSyncStore = defineStore('sync', {
           const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) {
             this.queue = normalizeQueueItems(JSON.parse(raw));
-            await idbSet(STORAGE_KEY, this.queue);
+            await idbSet(STORAGE_KEY, cloneForIndexedDb(this.queue));
           }
         }
         if (!historyFromDb) {
           const rawHistory = localStorage.getItem(HISTORY_KEY);
           if (rawHistory) {
             this.history = JSON.parse(rawHistory);
-            await idbSet(HISTORY_KEY, this.history);
+            await idbSet(HISTORY_KEY, cloneForIndexedDb(this.history));
           }
         }
       } catch (e) {
@@ -192,7 +197,10 @@ export const useSyncStore = defineStore('sync', {
     },
     async persist() {
       try {
-        await Promise.all([idbSet(STORAGE_KEY, this.queue), idbSet(HISTORY_KEY, this.history)]);
+        await Promise.all([
+          idbSet(STORAGE_KEY, cloneForIndexedDb(this.queue)),
+          idbSet(HISTORY_KEY, cloneForIndexedDb(this.history))
+        ]);
       } catch (e) {
         // Fallback para navegadores restringidos.
         console.warn('SyncStore: error guardando en IndexedDB, usando localStorage', e);
