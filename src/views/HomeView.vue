@@ -192,11 +192,13 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
 import { useToastStore } from '../stores/toastStore';
 
 const router = useRouter();
+const authStore = useAuthStore();
 const syncStore = useSyncStore();
 const pwa = usePwaStore();
 const toastStore = useToastStore();
@@ -292,6 +294,9 @@ function movementBadgeClass(r: { checklist_tracto: Record<string, unknown> | nul
 
 async function loadRegistros() {
   loadingRegistros.value = true;
+  if (navigator.onLine) {
+    await authStore.refreshSessionForApi();
+  }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user?.id) {
     registros.value = [];
@@ -306,6 +311,10 @@ async function loadRegistros() {
 
   if (error) {
     console.error('Error cargando registros', error);
+    const msg = error.message ?? '';
+    if (error.code === '401' || /jwt|invalid token/i.test(msg)) {
+      authStore.requireSessionRestart();
+    }
     registros.value = [];
   } else {
     registros.value = data ?? [];

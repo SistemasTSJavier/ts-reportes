@@ -1,3 +1,4 @@
+import type { Session } from '@supabase/supabase-js';
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { ensureDriveFolders } from '../services/driveService';
@@ -57,39 +58,52 @@ export const useAuthStore = defineStore('auth', {
       this.sessionRestartRequired = false;
     },
     /**
+     * Renueva access_token antes de RPC, REST o Edge Function (evita 401 Invalid JWT).
+     * Mantiene alineado provider_token de Google con la misma lógica que la cola de sync.
+     */
+    async refreshSessionForApi(): Promise<Session | null> {
+      if (this.sessionRestartRequired) return null;
+      try {
+        const {
+          data: { session: sessionInitial }
+        } = await supabase.auth.getSession();
+
+        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+        if (refreshErr) {
+          console.warn('refreshSessionForApi', refreshErr.message);
+          if (sessionInitial?.user) this.requireSessionRestart();
+          return null;
+        }
+        const session = refreshed.session ?? sessionInitial;
+        if (!session?.user) {
+          if (sessionInitial?.user) this.requireSessionRestart();
+          return null;
+        }
+
+        const uid = session.user.id;
+        const googleFromRefresh = this.getProviderTokenFromSession(session);
+        const googleFromInitial = this.getProviderTokenFromSession(sessionInitial);
+        const google =
+          googleFromRefresh ??
+          googleFromInitial ??
+          this.getGoogleProviderTokenFallback(uid) ??
+          null;
+        this.googleAccessToken = google;
+        if (google) this.rememberGoogleProviderToken(uid, google);
+
+        return session;
+      } catch (e) {
+        console.error('refreshSessionForApi', e);
+        this.requireSessionRestart();
+        return null;
+      }
+    },
+    /**
      * Al volver a la pestaña / primer plano: renueva el JWT para evitar 401.
-     * Si falla, obliga a reiniciar la app (recarga).
      */
     async refreshSessionOnForeground() {
       if (!this.isSignedIn || this.sessionRestartRequired) return;
-      try {
-        const {
-          data: { session: before }
-        } = await supabase.auth.getSession();
-        if (!before?.user) {
-          this.requireSessionRestart();
-          return;
-        }
-        const { data, error } = await supabase.auth.refreshSession();
-        if (error || !data.session?.user) {
-          console.warn('refreshSessionOnForeground:', error?.message ?? 'sin sesión');
-          this.requireSessionRestart();
-          return;
-        }
-        const s = data.session;
-        const uid = s.user?.id ?? before.user?.id;
-        // @ts-expect-error provider_token OAuth
-        const google = (s as any).provider_token ?? (before as any).provider_token;
-        const merged =
-          typeof google === 'string' && google.length > 0
-            ? google
-            : this.getGoogleProviderTokenFallback(uid ?? undefined);
-        this.googleAccessToken = merged ?? null;
-        if (merged && uid) this.rememberGoogleProviderToken(uid, merged);
-      } catch (e) {
-        console.error('refreshSessionOnForeground', e);
-        this.requireSessionRestart();
-      }
+      await this.refreshSessionForApi();
     },
     reloadApp() {
       window.location.reload();

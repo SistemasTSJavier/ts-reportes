@@ -1047,9 +1047,32 @@ function clearFirmaOficial() {
 async function persistRegistro() {
   saving.value = true;
 
-  const {
-    data: { session }
-  } = await supabase.auth.getSession();
+  let session = null as Awaited<ReturnType<typeof supabase.auth.getSession>>['data']['session'];
+  if (navigator.onLine) {
+    const refreshed = await authStore.refreshSessionForApi();
+    if (!refreshed) {
+      saving.value = false;
+      if (authStore.sessionRestartRequired) {
+        toastStore.error(
+          'Sesión expirada',
+          'Usa «Reiniciar aplicación» en pantalla completa y vuelve a iniciar sesión con Google.'
+        );
+      } else {
+        toastStore.error(
+          'Sesión',
+          'Inicia sesión con Google e inténtalo de nuevo.'
+        );
+      }
+      return;
+    }
+    session = refreshed;
+  } else {
+    const {
+      data: { session: s0 }
+    } = await supabase.auth.getSession();
+    session = s0;
+  }
+
   const userId = session?.user?.id ?? authStore.userId ?? null;
   if (!userId) {
     saving.value = false;
@@ -1154,6 +1177,13 @@ async function persistRegistro() {
   if (!folioError1 && folioData1) {
     folioAuto = folioData1 as string;
   } else {
+    const f1 = folioError1?.message ?? '';
+    if (folioError1?.code === '401' || /jwt|invalid token/i.test(f1)) {
+      saving.value = false;
+      authStore.requireSessionRestart();
+      toastStore.error('Sesión inválida', 'Reinicia la aplicación e inicia sesión de nuevo.');
+      return;
+    }
     // eslint-disable-next-line no-console
     console.warn('Error con RPC next_folio_ctpat(p_user_id). Intentando fallback sin parámetros:', folioError1);
     const { data: folioData2, error: folioError2 } = await supabase.rpc('next_folio_ctpat');
@@ -1163,10 +1193,16 @@ async function persistRegistro() {
       // eslint-disable-next-line no-console
       console.error('Error generando folio automático (fallback)', folioError2);
       saving.value = false;
-      toastStore.error(
-        'Error al generar folio',
-        'No se pudo obtener el folio automático. Contacta al administrador.'
-      );
+      const f2 = folioError2?.message ?? '';
+      if (folioError2?.code === '401' || /jwt|invalid token/i.test(f2)) {
+        authStore.requireSessionRestart();
+        toastStore.error('Sesión inválida', 'Reinicia la aplicación e inicia sesión de nuevo.');
+      } else {
+        toastStore.error(
+          'Error al generar folio',
+          'No se pudo obtener el folio automático. Contacta al administrador.'
+        );
+      }
       return;
     }
   }
@@ -1192,7 +1228,19 @@ async function persistRegistro() {
   if (error) {
     // eslint-disable-next-line no-console
     console.error('Error insert registro', error);
-    toastStore.error('Error al guardar el registro', error.message ?? 'Intenta nuevamente.');
+    const msg = error.message ?? '';
+    if (
+      error.code === '401' ||
+      /jwt|invalid token/i.test(msg)
+    ) {
+      authStore.requireSessionRestart();
+      toastStore.error(
+        'Sesión inválida',
+        'Reinicia la aplicación e inicia sesión de nuevo.'
+      );
+    } else {
+      toastStore.error('Error al guardar el registro', msg || 'Intenta nuevamente.');
+    }
     saving.value = false;
     return;
   }

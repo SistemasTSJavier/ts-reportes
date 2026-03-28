@@ -252,49 +252,14 @@ export const useSyncStore = defineStore('sync', {
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1`;
 
       try {
-        const {
-          data: { session: sessionInitial }
-        } = await supabase.auth.getSession();
-
-        // Renovar JWT de Supabase: si el access_token expiró, getSession() devuelve uno viejo y la API responde 401 Invalid JWT.
-        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-        if (refreshErr) {
-          console.warn('syncStore: refreshSession', refreshErr.message);
-          useAuthStore().requireSessionRestart();
-          return;
-        }
-        const session = refreshed.session ?? sessionInitial;
-        if (!session) {
-          useAuthStore().requireSessionRestart();
-          return;
-        }
-
-        // Tras refresh, a veces falta provider_token; conservamos el de la sesión anterior y caché local (mismo user).
-        // @ts-expect-error provider_token OAuth
-        const googleFromRefresh: string | undefined = (session as any)?.provider_token;
-        // @ts-expect-error provider_token OAuth
-        const googleFromInitial: string | undefined = (sessionInitial as any)?.provider_token;
         const authStore = useAuthStore();
-        const uid = session.user?.id;
-        const accessToken: string | undefined =
-          googleFromRefresh ??
-          googleFromInitial ??
-          authStore.getGoogleProviderTokenFallback(uid) ??
-          undefined;
-        if (accessToken && uid) {
-          authStore.rememberGoogleProviderToken(uid, accessToken);
+        const session = await authStore.refreshSessionForApi();
+        if (!session) {
+          return;
         }
 
-        // JWT de Supabase del usuario autenticado (necesario para que la Edge Function autorice la llamada)
-        const supabaseAccessTokenCandidate: unknown =
-          (session as any)?.access_token ??
-          (session as any)?.accessToken ??
-          (session as any)?.token?.access_token;
-
-        const supabaseAccessToken =
-          typeof supabaseAccessTokenCandidate === 'string'
-            ? supabaseAccessTokenCandidate
-            : undefined;
+        const supabaseAccessToken = session.access_token;
+        const accessToken: string | undefined = authStore.googleAccessToken ?? undefined;
 
         const looksLikeJwt = (t: string | undefined): boolean => {
           if (!t) return false;
