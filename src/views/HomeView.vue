@@ -291,11 +291,11 @@ function goNew() {
 }
 
 function retrySyncErrors() {
-  void syncStore.retryErroredItems({ fromUserGesture: true });
+  void syncStore.retryErroredItems();
 }
 
 function syncNow() {
-  void syncStore.processQueue({ fromUserGesture: true });
+  void syncStore.processQueue();
 }
 
 async function installPwa() {

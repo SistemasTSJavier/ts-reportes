@@ -1310,7 +1310,7 @@ async function persistRegistro() {
   let syncResult: ProcessQueueResult = { hadError: false, skipped: true };
   if (navigator.onLine) {
     for (let i = 0; i < 40; i++) {
-      syncResult = await syncStore.processQueue({ fromUserGesture: true });
+      syncResult = await syncStore.processQueue();
       if (!syncResult.skipped || syncResult.hadError) break;
       await new Promise((r) => setTimeout(r, 150));
     }

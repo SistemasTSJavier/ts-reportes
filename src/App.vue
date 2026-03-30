@@ -74,7 +74,6 @@ import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
 import ToastContainer from './components/ToastContainer.vue';
 import { supabase } from './supabaseClient';
-import { isGisConfigured, loadGoogleIdentityServices } from './services/googleIdentityDrive';
 
 const auth = useAuthStore();
 const sync = useSyncStore();
@@ -84,9 +83,6 @@ let authSubscription: { unsubscribe: () => void } | null = null;
 
 onMounted(() => {
   pwa.init();
-  if (isGisConfigured()) {
-    void loadGoogleIdentityServices();
-  }
   void auth.initSession();
 
   const { data } = supabase.auth.onAuthStateChange((event, session) => {

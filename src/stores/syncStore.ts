@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
-import { loadGoogleIdentityServices } from '../services/googleIdentityDrive';
 import { useAuthStore } from './authStore';
 import {
   isGoogleDriveAccessError,
@@ -50,11 +49,6 @@ export interface ProcessQueueResult {
   skipped: boolean;
 }
 
-export interface ProcessQueueOptions {
-  /** true si la llamada viene de un clic («Sincronizar ahora» / «Reintentar»). Necesario para abrir el popup de Google sin bloqueo. */
-  fromUserGesture?: boolean;
-}
-
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
 const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
 const IDB_NAME = 'ts_ctpat_sync_db_v1';
@@ -84,19 +78,17 @@ async function getSupabaseJwtForEdgeFunction(auth: ReturnType<typeof useAuthStor
 
 /**
  * Edge Function `generate-ctpat-pdf`: JWT Supabase + token Google Drive del usuario (cada cuenta su Drive).
- * Reintenta JWT Supabase ante 401 de puerta; ante error de Drive OAuth, un nuevo token GIS (consentimiento).
+ * Reintenta JWT Supabase ante 401 de puerta; ante error de Drive, otro token desde sesión Supabase.
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
-  options?: { googleAccessToken?: string; fromUserGesture?: boolean }
+  options?: { googleAccessToken?: string }
 ): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
-  const fromUserGesture = options?.fromUserGesture === true;
 
   let googleDriveAccessToken =
-    options?.googleAccessToken ??
-    (await auth.ensureGoogleDriveAccessTokenForApi({ fromUserGesture }));
+    options?.googleAccessToken ?? (await auth.ensureGoogleDriveAccessTokenForApi());
   let jwt = await getSupabaseJwtForEdgeFunction(auth);
 
   const runOnce = async (userJwt: string, accessToken: string): Promise<void> => {
@@ -165,16 +157,9 @@ async function invokeGenerateCtpatPdf(
           continue;
         }
         if (isGoogleDriveAccessError(message) && driveRound === 0) {
-          if (fromUserGesture) {
-            googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi({
-              interactive: true,
-              fromUserGesture: true
-            });
-            continue driveRetry;
-          }
-          throw new Error(
-            'Google Drive necesita autorizar de nuevo. Pulsa «Sincronizar ahora» o «Reintentar» en Inicio y permite ventanas emergentes para este sitio.'
-          );
+          await auth.refreshSessionForApi({ force: true });
+          googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi();
+          continue driveRetry;
         }
         throw err;
       }
@@ -391,7 +376,7 @@ export const useSyncStore = defineStore('sync', {
       this.queue.push(item);
       void this.persist();
     },
-    async processQueue(options?: ProcessQueueOptions): Promise<ProcessQueueResult> {
+    async processQueue(): Promise<ProcessQueueResult> {
       if (this.syncing) {
         return { hadError: false, skipped: true };
       }
@@ -399,7 +384,6 @@ export const useSyncStore = defineStore('sync', {
         return { hadError: false, skipped: true };
       }
 
-      const fromUserGesture = options?.fromUserGesture === true;
       const queueNeedsDrivePdf = this.queue.some(
         (q) =>
           q.status === 'pending' &&
@@ -413,16 +397,6 @@ export const useSyncStore = defineStore('sync', {
 
       try {
         const authStore = useAuthStore();
-
-        // Popup de GIS solo funciona si hay gesto del usuario; adelantamos Drive antes de otros await largos.
-        if (fromUserGesture && queueNeedsDrivePdf && navigator.onLine) {
-          try {
-            await loadGoogleIdentityServices();
-            await authStore.ensureGoogleDriveAccessTokenForApi({ fromUserGesture: true });
-          } catch {
-            /* sigue con token silencioso / Supabase más abajo */
-          }
-        }
 
         await this.updateConnectivity();
         if (this.connectivity !== 'online') {
@@ -463,8 +437,7 @@ export const useSyncStore = defineStore('sync', {
               const driveTok =
                 prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
               await invokeGenerateCtpatPdf(payload.registroId, {
-                googleAccessToken: driveTok,
-                fromUserGesture
+                googleAccessToken: driveTok
               });
               if (authStore.googleAccessToken) {
                 prefetchedDriveToken = authStore.googleAccessToken;
@@ -519,8 +492,7 @@ export const useSyncStore = defineStore('sync', {
               const driveTok =
                 prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
               await invokeGenerateCtpatPdf(inserted.id, {
-                googleAccessToken: driveTok,
-                fromUserGesture
+                googleAccessToken: driveTok
               });
               if (authStore.googleAccessToken) {
                 prefetchedDriveToken = authStore.googleAccessToken;
@@ -568,7 +540,7 @@ export const useSyncStore = defineStore('sync', {
         }
       }
     },
-    async retryErroredItems(opts?: ProcessQueueOptions) {
+    async retryErroredItems() {
       for (const item of this.queue) {
         if (item.status === 'error') {
           item.status = 'pending';
@@ -577,7 +549,7 @@ export const useSyncStore = defineStore('sync', {
         }
       }
       await this.persist();
-      return this.processQueue(opts);
+      return this.processQueue();
     },
     attachOnlineListener() {
       window.addEventListener('offline', () => {
