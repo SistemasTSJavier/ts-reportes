@@ -1,6 +1,8 @@
 /**
  * Detecta errores de Supabase/PostgREST/GoTrue que requieren volver a iniciar sesión.
- * Evita mostrar al usuario textos crudos como "401" o "Invalid JWT".
+ *
+ * Importante: NO usar "invalid token" suelto: Google Drive devuelve frases parecidas cuando falla
+ * el OAuth de Drive, y eso NO debe cerrar la sesión de Supabase ni borrar el registro ya guardado.
  */
 export function isSessionExpiredError(
   message: string | null | undefined,
@@ -12,14 +14,24 @@ export function isSessionExpiredError(
   const m = (message ?? '').toLowerCase();
   if (!m.trim()) return false;
 
-  if (m.includes('http 401') || m.includes('status code 401')) return true;
-  if (m.includes('invalid jwt') || m.includes('invalid token')) return true;
-  if (m.includes('jwt expired') || m.includes('token expired')) return true;
-  if (m.includes('authorization') && m.includes('failed')) return true;
-  if (m.includes('session') && (m.includes('missing') || m.includes('invalid'))) return true;
-  if (m.includes('refresh_token') && (m.includes('invalid') || m.includes('revoked'))) return true;
+  // Puerta de enlace Supabase / GoTrue (JWT de usuario Supabase)
+  if (/\binvalid jwt\b/.test(m)) return true;
+  if (/\bjwt expired\b/.test(m)) return true;
+  if (m.includes('http 401:') && (m.includes('jwt') || m.includes('unauthorized'))) return true;
+
+  // PostgREST en cuerpo de error
+  if (m.includes('pgrst301') || m.includes('pgrst302')) return true;
 
   return false;
+}
+
+/**
+ * Solo para reintento de Edge Function con otro JWT Supabase (no cerrar sesión).
+ * Más estricto que errores de Drive mezclados en el mismo mensaje.
+ */
+export function isSupabaseGatewayUnauthorized(message: string | null | undefined): boolean {
+  const m = (message ?? '').toLowerCase();
+  return /\binvalid jwt\b/.test(m) || (m.includes('http 401:') && m.includes('jwt'));
 }
 
 /** Texto para toasts (sin códigos HTTP). */

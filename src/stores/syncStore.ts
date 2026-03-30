@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { useAuthStore } from './authStore';
-import { isSessionExpiredError, SESSION_EXPIRED_SHORT } from '../utils/supabaseAuthErrors';
+import { isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -118,19 +118,15 @@ async function invokeGenerateCtpatPdf(
       return;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (attempt === 0 && isSessionExpiredError(message)) {
+      // Reintento solo si el fallo es claramente el JWT de Supabase (401 gateway), no errores de Drive/PDF.
+      // Nunca cerramos sesión aquí: el registro ya puede estar guardado; Drive/Google falla aparte.
+      if (attempt === 0 && isSupabaseGatewayUnauthorized(message)) {
         const recovered = await auth.refreshSessionForApi({ force: true });
         const next = recovered?.access_token;
         if (next) {
           jwt = next;
           continue;
         }
-        await auth.signOutDueToExpiredSession();
-        throw new Error(SESSION_EXPIRED_SHORT);
-      }
-      if (isSessionExpiredError(message)) {
-        await auth.signOutDueToExpiredSession();
-        throw new Error(SESSION_EXPIRED_SHORT);
       }
       throw err;
     }
