@@ -92,6 +92,96 @@ function decodeJwtSub(authorizationHeader: string | null): string | null {
   }
 }
 
+const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
+const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+const ROOT_FOLDER_NAME = 'TS REPORTES';
+const PDF_FOLDER_NAME = 'PDFs';
+const IMAGES_FOLDER_NAME = 'Evidencias';
+
+const DRIVE_MAX_ATTEMPTS = 4;
+const DRIVE_RETRY_BASE_MS = 400;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Rate limit / servidor / timeout: reintentar. 401/403: no (token o permisos). */
+function driveStatusRetryable(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504);
+}
+
+async function driveErrorDetail(res: Response): Promise<string> {
+  const t = await res.text();
+  try {
+    const j = JSON.parse(t) as {
+      error?: { message?: string; errors?: { message?: string }[] };
+    };
+    return j.error?.message ?? j.error?.errors?.[0]?.message ?? t;
+  } catch {
+    return t;
+  }
+}
+
+/**
+ * Peticiones a Google Drive con reintentos en fallos transitorios.
+ * 401/403: mensaje claro (OAuth de Google, no sesión Supabase).
+ */
+async function driveFetch(
+  accessToken: string,
+  url: string,
+  init: RequestInit
+): Promise<Response> {
+  const headers = new Headers(init.headers as HeadersInit);
+  headers.set('Authorization', `Bearer ${accessToken}`);
+
+  let lastNonRetryable = '';
+
+  for (let attempt = 0; attempt < DRIVE_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers
+      });
+
+      if (res.ok) return res;
+
+      const detail = await driveErrorDetail(res);
+
+      if (res.status === 401) {
+        throw new Error(
+          'El acceso a Google Drive expiró o el token no es válido. Vuelve a iniciar sesión con Google en la app y acepta los permisos de Drive.'
+        );
+      }
+      if (res.status === 403) {
+        throw new Error(
+          'Google Drive rechazó la operación (permisos). Revisa la cuenta o vuelve a conectar la app con Google.'
+        );
+      }
+
+      if (!driveStatusRetryable(res.status) || attempt === DRIVE_MAX_ATTEMPTS - 1) {
+        lastNonRetryable = `Google Drive (${res.status}): ${detail.slice(0, 600)}`;
+        throw new Error(lastNonRetryable);
+      }
+
+      await sleep(DRIVE_RETRY_BASE_MS * Math.pow(2, attempt));
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('El acceso a Google Drive')) throw e;
+      if (e instanceof Error && e.message.startsWith('Google Drive rechazó')) throw e;
+      if (e instanceof Error && e.message.startsWith('Google Drive (')) throw e;
+
+      const isLast = attempt === DRIVE_MAX_ATTEMPTS - 1;
+      if (isLast) {
+        throw new Error(
+          `No se pudo conectar con Google Drive tras varios intentos: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+      await sleep(DRIVE_RETRY_BASE_MS * Math.pow(2, attempt));
+    }
+  }
+
+  throw new Error(lastNonRetryable || 'Error desconocido en Google Drive');
+}
+
 async function uploadToDrive(
   accessToken: string,
   fileName: string,
@@ -133,30 +223,16 @@ async function uploadToDrive(
   offset += bytes.length;
   multipartBody.set(part3, offset);
 
-  const res = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`
-      },
-      body: multipartBody
-    }
-  );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Error subiendo a Google Drive: ${text}`);
-  }
+  const res = await driveFetch(accessToken, DRIVE_UPLOAD_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': `multipart/related; boundary=${boundary}`
+    },
+    body: multipartBody
+  });
 
   return res.json();
 }
-
-const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
-const ROOT_FOLDER_NAME = 'TS REPORTES';
-const PDF_FOLDER_NAME = 'PDFs';
-const IMAGES_FOLDER_NAME = 'Evidencias';
 
 async function findFolderId(
   accessToken: string,
@@ -177,13 +253,12 @@ async function findFolderId(
   }
 
   const q = qParts.join(' and ');
-  const res = await fetch(`${DRIVE_FILES_URL}?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=5`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
-    }
-  });
+  const res = await driveFetch(
+    accessToken,
+    `${DRIVE_FILES_URL}?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=5`,
+    { method: 'GET' }
+  );
 
-  if (!res.ok) return null;
   const data = (await res.json()) as { files?: { id: string; name: string }[] };
   const first = data.files?.[0]?.id;
   return first ?? null;
@@ -204,19 +279,14 @@ async function createFolder(
     body.parents = ['root'];
   }
 
-  const res = await fetch(DRIVE_FILES_URL, {
+  const res = await driveFetch(accessToken, DRIVE_FILES_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Error creando carpeta "${name}" en Drive: ${text}`);
-  }
   const data = (await res.json()) as { id: string };
   return data.id;
 }
