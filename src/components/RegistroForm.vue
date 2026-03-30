@@ -569,7 +569,11 @@ import type { ProcessQueueResult } from '../stores/syncStore';
 import { VueSignaturePad } from 'vue-signature-pad';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
-import { isSessionExpiredError, SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
+import {
+  isSessionExpiredError,
+  SESSION_EXPIRED,
+  SESSION_EXPIRED_SHORT
+} from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { useToastStore } from '../stores/toastStore';
 import { useSyncStore } from '../stores/syncStore';
@@ -1322,7 +1326,11 @@ async function persistRegistro() {
   if (syncResult.hadError) {
     saveSyncPhase.value = 'error';
     saveSyncDetail.value = syncResult.lastError ?? 'Error desconocido al generar o subir el PDF.';
-    toastStore.error('Sincronización', saveSyncDetail.value);
+    if (syncResult.lastError === SESSION_EXPIRED_SHORT) {
+      toastStore.error(SESSION_EXPIRED.title, SESSION_EXPIRED.message);
+    } else {
+      toastStore.error('Sincronización', saveSyncDetail.value);
+    }
     return;
   }
 

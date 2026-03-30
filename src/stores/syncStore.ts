@@ -338,13 +338,14 @@ export const useSyncStore = defineStore('sync', {
     /**
      * JWT inválido (p. ej. usuario borrado en Supabase, refresh revocado): limpia cola local y cierra sesión.
      */
+    /** Cierra sesión sin toast (el caller muestra un solo mensaje claro). */
     async handleSessionInvalidated() {
       this.clearRetryTimer();
       this.retryAttempt = 0;
       this.queue = [];
       await this.persist();
       const auth = useAuthStore();
-      await auth.signOutDueToExpiredSession();
+      await auth.signOut();
     },
     enqueueCreateRegistroAndGenerate(payload: CreateRegistroAndGeneratePayload) {
       const now = new Date().toISOString();
@@ -403,13 +404,22 @@ export const useSyncStore = defineStore('sync', {
           return { hadError: false, skipped: true };
         }
 
-        const session = await authStore.refreshSessionForApi({ force: true });
+        let session = await authStore.refreshSessionForApi({ force: true });
         if (!session?.access_token) {
-          if (navigator.onLine && this.connectivity === 'online') {
-            await this.handleSessionInvalidated();
-            return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
+          const {
+            data: { session: fallback }
+          } = await supabase.auth.getSession();
+          if (fallback?.access_token) {
+            session = fallback;
           }
-          return { hadError: true, lastError: 'Sesión no válida.', skipped: false };
+        }
+        if (!session?.access_token) {
+          return {
+            hadError: true,
+            lastError:
+              'No se pudo validar la sesión para sincronizar. Comprueba la conexión o vuelve a iniciar sesión con Google.',
+            skipped: false
+          };
         }
 
         let prefetchedDriveToken: string | undefined;
