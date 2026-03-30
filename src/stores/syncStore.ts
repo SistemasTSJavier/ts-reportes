@@ -379,7 +379,8 @@ export const useSyncStore = defineStore('sync', {
 
       try {
         const authStore = useAuthStore();
-        const session = await authStore.refreshSessionForApi();
+        // Refresco fuerte para alinear JWT Supabase y provider_token de Google antes de Drive.
+        const session = await authStore.refreshSessionForApi({ force: true });
         if (!session?.access_token) {
           return;
         }
@@ -429,9 +430,15 @@ export const useSyncStore = defineStore('sync', {
                 this.enqueueDriveSync(payload.registroId);
               }
             } else if (item.kind === 'create_registro_and_generate') {
-              // 1) Generar folio
+              if (!accessToken) {
+                throw new Error(
+                  'Hace falta Google Drive para crear el registro y enviarlo a servicios. Cierra sesión e inicia de nuevo con Google y acepta permisos de Drive.'
+                );
+              }
+
               const payload = item.payload as CreateRegistroAndGeneratePayload;
 
+              // 1) Generar folio
               const { data: folioData, error: folioErr } = await supabase.rpc('next_folio_ctpat', {
                 p_user_id: payload.userId
               });
@@ -459,12 +466,8 @@ export const useSyncStore = defineStore('sync', {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
 
-              // 3) Generar PDF + Storage (Drive opcional si hay token de Google)
-              const pdfResult = await invokeGenerateCtpatPdf(
-                inserted.id,
-                accessToken ?? null,
-                supabaseJwt
-              );
+              // 3) PDF a Drive primero (servicios), luego respaldo en Storage (Edge Function)
+              await invokeGenerateCtpatPdf(inserted.id, accessToken, supabaseJwt);
 
               item.status = 'done';
               item.lastError = undefined;
@@ -477,10 +480,6 @@ export const useSyncStore = defineStore('sync', {
                 } satisfies GeneratePdfPayload
               });
               hadSuccess = true;
-
-              if (pdfResult.needsDriveSync) {
-                this.enqueueDriveSync(inserted.id);
-              }
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);

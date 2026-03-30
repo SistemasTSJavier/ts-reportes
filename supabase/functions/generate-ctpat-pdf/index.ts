@@ -2257,10 +2257,18 @@ Deno.serve(async (req) => {
       );
     }
 
-    // --- Generar PDF + Storage; Drive opcional si hay token de Google ---
+    // --- Generar PDF: Drive primero (formato para servicios), Storage como respaldo ---
     registroIdForCleanup = registroId;
 
     const data = row;
+
+    if (!accessToken) {
+      return jsonError(
+        origin,
+        400,
+        'Se requiere acceso a Google Drive para subir el registro a servicios. Inicia sesión con Google y acepta los permisos de Drive.'
+      );
+    }
 
     const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
     const userMeta = authUserRow?.user?.user_metadata as Record<string, unknown> | undefined;
@@ -2272,7 +2280,7 @@ Deno.serve(async (req) => {
       .single<UserDriveConfigRow>();
 
     let finalDriveCfg: UserDriveConfigRow | null = driveCfg ?? null;
-    if (accessToken && (driveCfgError || !finalDriveCfg)) {
+    if (driveCfgError || !finalDriveCfg) {
       const { pdfFolderId, imagesFolderId } = await ensureDriveFolders(accessToken);
       const { data: inserted, error: insertErr } = await supabaseServer
         .from('user_drive_config')
@@ -2296,6 +2304,10 @@ Deno.serve(async (req) => {
       }
     }
 
+    if (!finalDriveCfg?.pdf_folder_id || !finalDriveCfg?.images_folder_id) {
+      return jsonError(origin, 500, 'No se pudo preparar las carpetas de Google Drive para el usuario.');
+    }
+
     const resolvedCenterLogo = (() => {
       const d = finalDriveCfg?.service_logo_file?.trim();
       if (d) return d;
@@ -2304,18 +2316,6 @@ Deno.serve(async (req) => {
     })();
 
     const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer);
-    const storagePath = `${data.user_id}/${data.id}.pdf`;
-
-    const { error: upErr } = await supabaseServer.storage
-      .from(PDF_STORAGE_BUCKET)
-      .upload(storagePath, pdfBytes, {
-        contentType: 'application/pdf',
-        upsert: true
-      });
-
-    if (upErr) {
-      throw new Error(`No se pudo guardar el PDF en Storage: ${upErr.message}`);
-    }
 
     const rawFolioFile = (data.folio_pdf ?? '').toString().trim();
     const mFile = rawFolioFile.match(/^TS-0*(\d+)$/i);
@@ -2323,40 +2323,43 @@ Deno.serve(async (req) => {
     const folioFile = folioNumFile != null ? `TS-${folioNumFile}` : rawFolioFile || `TS-${data.id}`;
     const fileName = `${folioFile}.pdf`;
 
-    let driveResponse: unknown = null;
-    let driveSynced = false;
-    let driveError: string | undefined;
-    let uploadedImages: { name: string; id: string }[] = [];
+    // 1) Google Drive primero: si falla, error HTTP y no se marca como synced (servicios sin formato).
+    const driveResponse = await uploadToDrive(
+      accessToken,
+      fileName,
+      pdfBytes,
+      'application/pdf',
+      finalDriveCfg.pdf_folder_id
+    );
+    const uploadedImages = await uploadEvidenceImagesToDrive(
+      accessToken,
+      data,
+      finalDriveCfg.images_folder_id
+    );
 
-    if (accessToken && finalDriveCfg) {
-      try {
-        driveResponse = await uploadToDrive(
-          accessToken,
-          fileName,
-          pdfBytes,
-          'application/pdf',
-          finalDriveCfg.pdf_folder_id
-        );
-        uploadedImages = await uploadEvidenceImagesToDrive(
-          accessToken,
-          data,
-          finalDriveCfg.images_folder_id
-        );
-        driveSynced = true;
-      } catch (e) {
-        console.error('Drive (opcional) tras Storage:', e);
-        driveError = e instanceof Error ? e.message : String(e);
-      }
+    const driveId = (driveResponse as { id?: string }).id ?? null;
+
+    // 2) Copia en Storage (respaldo); un fallo aquí no invalida Drive.
+    const storagePath = `${data.user_id}/${data.id}.pdf`;
+    let storagePathSaved: string | null = null;
+    const { error: upErr } = await supabaseServer.storage
+      .from(PDF_STORAGE_BUCKET)
+      .upload(storagePath, pdfBytes, {
+        contentType: 'application/pdf',
+        upsert: true
+      });
+    if (upErr) {
+      console.error('Storage backup tras Drive OK:', upErr.message);
+    } else {
+      storagePathSaved = storagePath;
     }
-
-    const newDriveId = driveSynced ? ((driveResponse as { id?: string }).id ?? null) : data.drive_file_id;
 
     await supabaseServer
       .from('registros_ctpat')
       .update({
         sync_status: 'synced',
-        pdf_storage_path: storagePath,
-        drive_file_id: newDriveId,
+        pdf_storage_path: storagePathSaved,
+        drive_file_id: driveId,
         evidencias_exif: mergeEvidencias(data.evidencias_exif, uploadedImages)
       })
       .eq('id', data.id)
@@ -2365,10 +2368,9 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         ok: true,
-        storagePath,
-        driveSynced,
-        driveError: driveError ?? null,
-        needsDriveSync: !driveSynced,
+        storagePath: storagePathSaved,
+        driveSynced: true,
+        needsDriveSync: false,
         driveFile: driveResponse
       }),
       {
