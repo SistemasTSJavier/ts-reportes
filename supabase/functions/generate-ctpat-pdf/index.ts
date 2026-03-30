@@ -10,6 +10,8 @@ import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, degrees } from 'npm:
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+/** Valida el JWT con Auth (GET /user); evita 401 por fallos al decodificar base64 del payload en algunos clientes. */
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
 
 /** PDFs por usuario; solo la Edge Function sube con service_role. */
 const PDF_STORAGE_BUCKET = 'ctpat-pdfs';
@@ -95,6 +97,34 @@ function decodeJwtSub(authorizationHeader: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Resuelve el usuario del header Authorization validando contra Auth (recomendado).
+ * Si no hay SUPABASE_ANON_KEY, usa solo decodificación local (menos fiable en edge cases).
+ */
+async function resolveUserIdFromAuthorization(
+  authorizationHeader: string | null
+): Promise<string | null> {
+  if (!authorizationHeader?.trim()) return null;
+  const raw = authorizationHeader.trim();
+  const token = raw.startsWith('Bearer ') ? raw.slice('Bearer '.length).trim() : raw;
+  if (!token) return null;
+
+  if (SUPABASE_ANON_KEY) {
+    const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const {
+      data: { user },
+      error
+    } = await authClient.auth.getUser(token);
+    if (!error && user?.id) {
+      return user.id;
+    }
+  }
+
+  return decodeJwtSub(authorizationHeader);
 }
 
 const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
@@ -2069,11 +2099,9 @@ Deno.serve(async (req) => {
     return jsonError(origin, 405, 'Método no permitido');
   }
 
-  // La Edge Function requiere JWT válido de Supabase.
-  // Además, verificamos que el `registroId` pertenece al usuario autenticado.
+  // La Edge Function requiere JWT válido de Supabase (validado vía getUser o payload).
   const supabaseAuthHeader = req.headers.get('Authorization');
-  const currentUserId = decodeJwtSub(supabaseAuthHeader);
-  if (!supabaseAuthHeader) {
+  if (!supabaseAuthHeader?.trim()) {
     return new Response(JSON.stringify({ ok: false, error: 'Unauthorized: missing Authorization header' }), {
       status: 401,
       headers: {
@@ -2083,14 +2111,21 @@ Deno.serve(async (req) => {
     });
   }
 
+  const currentUserId = await resolveUserIdFromAuthorization(supabaseAuthHeader);
   if (!currentUserId) {
-    return new Response(JSON.stringify({ ok: false, error: 'Unauthorized: invalid JWT or missing user id claim' }), {
-      status: 401,
-      headers: {
-        'Content-Type': 'application/json',
-        ...corsHeaders(origin)
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: 'Unauthorized: invalid or expired session (vuelve a iniciar sesión con Google)'
+      }),
+      {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders(origin)
+        }
       }
-    });
+    );
   }
 
   let registroIdForCleanup: string | null = null;
