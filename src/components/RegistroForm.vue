@@ -490,11 +490,41 @@
       </div>
     </section>
 
-    <!-- 10. Botones finales -->
+    <!-- 10. Estado sincronización + botones -->
+    <section
+      v-if="saveSyncPhase !== 'idle'"
+      class="rounded-lg border p-4"
+      :class="saveSyncPanelClass"
+      role="status"
+    >
+      <p class="text-sm font-semibold flex items-center gap-2">
+        <span
+          v-if="saveSyncPhase === 'saving' || saveSyncPhase === 'syncing'"
+          class="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent opacity-80"
+        />
+        {{ saveSyncPanelTitle }}
+      </p>
+      <p
+        v-if="saveSyncPhase === 'error' && saveSyncDetail"
+        class="text-xs mt-2 opacity-95 break-words"
+      >
+        {{ saveSyncDetail }}
+      </p>
+      <p
+        v-if="saveSyncPhase === 'success' && lastSavedFolio"
+        class="text-xs mt-1 opacity-90"
+      >
+        Folio: {{ lastSavedFolio }}
+      </p>
+    </section>
+
     <section class="flex flex-wrap items-center justify-end gap-3 pt-2">
-      <p v-if="saving" class="text-sm text-slate-500 flex items-center gap-2">
+      <p
+        v-if="saving && saveSyncPhase === 'idle'"
+        class="text-sm text-slate-500 flex items-center gap-2"
+      >
         <span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-tactical-blue border-t-transparent" />
-        Guardando registro...
+        Preparando…
       </p>
       <button
         type="submit"
@@ -535,6 +565,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
+import type { ProcessQueueResult } from '../stores/syncStore';
 import { VueSignaturePad } from 'vue-signature-pad';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
@@ -734,6 +765,39 @@ const operadorPad = ref<InstanceType<typeof VueSignaturePad> | null>(null);
 const oficialPad = ref<InstanceType<typeof VueSignaturePad> | null>(null);
 
 const saving = ref(false);
+/** Panel tras guardar: sincronización con Drive / PDF */
+const saveSyncPhase = ref<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
+const saveSyncDetail = ref('');
+const lastSavedFolio = ref('');
+
+const saveSyncPanelTitle = computed(() => {
+  switch (saveSyncPhase.value) {
+    case 'saving':
+      return 'Guardando registro en el servidor…';
+    case 'syncing':
+      return 'Sincronizando PDF con Google Drive…';
+    case 'success':
+      return 'Listo: registro y PDF sincronizados correctamente.';
+    case 'error':
+      return 'No se pudo completar la sincronización';
+    default:
+      return '';
+  }
+});
+
+const saveSyncPanelClass = computed(() => {
+  switch (saveSyncPhase.value) {
+    case 'success':
+      return 'border-emerald-200 bg-emerald-50 text-emerald-900';
+    case 'error':
+      return 'border-rose-200 bg-rose-50 text-rose-900';
+    case 'saving':
+    case 'syncing':
+      return 'border-blue-200 bg-blue-50 text-blue-900';
+    default:
+      return 'border-slate-200 bg-slate-50';
+  }
+});
 const showCriticalModal = ref(false);
 const pendingSubmit = ref(false);
 const fechaInput = ref<HTMLInputElement | null>(null);
@@ -1047,6 +1111,9 @@ function clearFirmaOficial() {
 
 async function persistRegistro() {
   saving.value = true;
+  saveSyncPhase.value = 'idle';
+  saveSyncDetail.value = '';
+  lastSavedFolio.value = '';
 
   let session = null as Awaited<ReturnType<typeof supabase.auth.getSession>>['data']['session'];
   if (navigator.onLine) {
@@ -1142,7 +1209,6 @@ async function persistRegistro() {
   };
 
   if (!navigator.onLine) {
-    // Si la cola está llena (localStorage), se puede lanzar. En ese caso, avisamos.
     try {
       syncStore.enqueueCreateRegistroAndGenerate({ userId, insertPayloadBase });
       toastStore.info(
@@ -1161,6 +1227,8 @@ async function persistRegistro() {
     return;
   }
 
+  saveSyncPhase.value = 'saving';
+
   // Obtener folio automático TS-0001, TS-0002, ...
   // IMPORTANTE: la función en BD ahora se llama `next_folio_ctpat(p_user_id uuid default null)`.
   // Mientras se aplica la migración (o si el backend aún no se actualizó), hacemos fallback sin parámetros.
@@ -1174,6 +1242,7 @@ async function persistRegistro() {
     const f1 = folioError1?.message ?? '';
     if (isSessionExpiredError(folioError1?.message, folioError1?.code)) {
       saving.value = false;
+      saveSyncPhase.value = 'idle';
       await authStore.signOutDueToExpiredSession();
       return;
     }
@@ -1186,6 +1255,7 @@ async function persistRegistro() {
       // eslint-disable-next-line no-console
       console.error('Error generando folio automático (fallback)', folioError2);
       saving.value = false;
+      saveSyncPhase.value = 'idle';
       const f2 = folioError2?.message ?? '';
       if (isSessionExpiredError(folioError2?.message, folioError2?.code)) {
         await authStore.signOutDueToExpiredSession();
@@ -1201,6 +1271,7 @@ async function persistRegistro() {
 
   if (!folioAuto) {
     saving.value = false;
+    saveSyncPhase.value = 'idle';
     toastStore.error('Error al generar folio', 'Folio automático viene vacío.');
     return;
   }
@@ -1227,26 +1298,62 @@ async function persistRegistro() {
       toastStore.error('Error al guardar el registro', msg || 'Intenta nuevamente.');
     }
     saving.value = false;
+    saveSyncPhase.value = 'idle';
     return;
   }
 
   const registroId = data.id as string;
 
+  saveSyncPhase.value = 'syncing';
   syncStore.enqueueGeneratePdf({ registroId, folio: folioAuto });
 
+  let syncResult: ProcessQueueResult = { hadError: false, skipped: true };
   if (navigator.onLine) {
-    void syncStore.processQueue();
+    for (let i = 0; i < 40; i++) {
+      syncResult = await syncStore.processQueue();
+      if (!syncResult.skipped || syncResult.hadError) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
   }
 
   saving.value = false;
+  lastSavedFolio.value = folioAuto;
 
-  // UX: volvemos a la pantalla principal y mostramos confirmacion profesional
-  toastStore.success('REGISTRO COMPLETADO!', `FOLIO: ${folioAuto}`);
+  if (syncResult.hadError) {
+    saveSyncPhase.value = 'error';
+    saveSyncDetail.value = syncResult.lastError ?? 'Error desconocido al generar o subir el PDF.';
+    toastStore.error('Sincronización', saveSyncDetail.value);
+    return;
+  }
+
+  if (syncResult.skipped) {
+    const qid = `pdf_${registroId}`;
+    const item = syncStore.queue.find((q) => q.id === qid);
+    if (item?.status === 'error') {
+      saveSyncPhase.value = 'error';
+      saveSyncDetail.value = item.lastError ?? 'Error al sincronizar.';
+      toastStore.error('Sincronización', saveSyncDetail.value);
+      return;
+    }
+    if (item?.status === 'pending' || item?.status === 'processing') {
+      saveSyncPhase.value = 'error';
+      saveSyncDetail.value =
+        'La sincronización sigue en cola. Abre Inicio y pulsa «Sincronizar ahora» o «Reintentar».';
+      toastStore.info('Cola activa', saveSyncDetail.value);
+      return;
+    }
+  }
+
+  saveSyncPhase.value = 'success';
+  toastStore.success('REGISTRO COMPLETADO', `FOLIO: ${folioAuto}`);
   try {
     await router.push({ name: 'home' });
-  } catch (e) {
+  } catch {
     toastStore.error('Error', 'Registro guardado, pero no se pudo regresar al panel.');
   }
+  setTimeout(() => {
+    saveSyncPhase.value = 'idle';
+  }, 400);
 }
 
 async function onSubmit() {

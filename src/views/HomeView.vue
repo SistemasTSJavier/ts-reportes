@@ -34,6 +34,23 @@
         >
           Instalar app en Android
         </button>
+        <button
+          v-if="erroredSyncCount > 0"
+          type="button"
+          class="text-xs text-tactical-blue font-semibold hover:underline"
+          @click="retrySyncErrors"
+        >
+          Reintentar ({{ erroredSyncCount }})
+        </button>
+        <button
+          v-if="syncQueueItems.length > 0 || pendingSyncCount > 0"
+          type="button"
+          class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
+          :disabled="syncStore.syncing || syncStore.connectivity === 'offline'"
+          @click="syncNow"
+        >
+          {{ syncStore.syncing ? 'Sincronizando…' : 'Sincronizar ahora' }}
+        </button>
         <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
           <button
             v-for="opt in movementOptions"
@@ -57,6 +74,14 @@
         role="alert"
       >
         {{ syncErrorMessage }}
+      </p>
+      <p
+        v-if="syncQueueItems.length > 0"
+        class="mt-2 text-xs text-slate-500"
+      >
+        Cola: {{ syncQueueItems.length }} elemento(s)
+        <span v-if="pendingSyncCount"> · pendientes: {{ pendingSyncCount }}</span>
+        <span v-if="erroredSyncCount"> · con error: {{ erroredSyncCount }}</span>
       </p>
     </section>
 
@@ -119,7 +144,7 @@ import { supabase } from '../supabaseClient';
 import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
-import { useSyncStore } from '../stores/syncStore';
+import { useSyncStore, type SyncKind } from '../stores/syncStore';
 import { useToastStore } from '../stores/toastStore';
 
 const router = useRouter();
@@ -142,12 +167,6 @@ const movementOptions = [
   { label: 'Entrada', value: 'entrada' },
   { label: 'Salida', value: 'salida' }
 ] as const;
-const queueFilterOptions = [
-  { label: 'Todos', value: 'all' },
-  { label: 'Pendientes', value: 'pending' },
-  { label: 'Errores', value: 'error' }
-] as const;
-
 interface QueueRow {
   id: string;
   kind: SyncKind;
@@ -163,23 +182,25 @@ const erroredSyncCount = computed(() => syncStore.queue.filter((q) => q.status =
 const syncQueueItems = computed<QueueRow[]>(() =>
   [...syncStore.queue].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
 );
-const filteredSyncQueueItems = computed(() => {
-  if (queueFilter.value === 'all') return syncQueueItems.value;
-  if (queueFilter.value === 'pending') {
-    return syncQueueItems.value.filter((q) => q.status === 'pending' || q.status === 'processing');
-  }
-  return syncQueueItems.value.filter((q) => q.status === 'error');
+const syncErrorMessage = computed(() => {
+  const failed = syncStore.queue.filter((q) => q.status === 'error' && q.lastError);
+  if (failed.length === 0) return '';
+  const latest = [...failed].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  )[0];
+  return latest?.lastError ?? '';
 });
 const syncStatusText = computed(() => {
   if (syncStore.connectivity === 'offline') return 'Sin conexión';
-  if (pendingSyncCount.value > 0) return `Sincronizando pendientes (${pendingSyncCount.value})`;
-  if (erroredSyncCount.value > 0) return `Errores de sincronización (${erroredSyncCount.value})`;
+  if (syncStore.syncing) return 'Sincronizando…';
+  if (pendingSyncCount.value > 0) return `Pendientes (${pendingSyncCount.value})`;
+  if (erroredSyncCount.value > 0) return `Error (${erroredSyncCount.value})`;
   return 'Sincronización al día';
 });
 const syncStatusClass = computed(() => {
   if (syncStore.connectivity === 'offline') return 'bg-amber-100 text-amber-800';
   if (erroredSyncCount.value > 0) return 'bg-rose-100 text-rose-800';
-  if (pendingSyncCount.value > 0) return 'bg-blue-100 text-blue-800';
+  if (syncStore.syncing || pendingSyncCount.value > 0) return 'bg-blue-100 text-blue-800';
   return 'bg-emerald-100 text-emerald-800';
 });
 
@@ -258,6 +279,14 @@ watch(
 
 function goNew() {
   router.push({ name: 'registro-new' });
+}
+
+function retrySyncErrors() {
+  void syncStore.retryErroredItems();
+}
+
+function syncNow() {
+  void syncStore.processQueue();
 }
 
 async function installPwa() {

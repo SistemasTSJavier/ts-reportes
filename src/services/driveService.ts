@@ -13,6 +13,17 @@ export interface DriveFolders {
   imagesFolderId: string;
 }
 
+const DRIVE_RETRY_MAX = 3;
+const DRIVE_RETRY_BASE_MS = 350;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function driveRetryable(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504);
+}
+
 /**
  * Crea una carpeta en Drive (raíz o dentro de parentId).
  */
@@ -31,22 +42,39 @@ async function createFolder(
     body.parents = ['root'];
   }
 
-  const res = await fetch(DRIVE_FILES_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
+  let lastErr = '';
+  for (let attempt = 0; attempt < DRIVE_RETRY_MAX; attempt++) {
+    const res = await fetch(DRIVE_FILES_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      return (await res.json()) as { id: string };
+    }
+
     const text = await res.text();
-    throw new Error(`Error creando carpeta "${name}" en Drive: ${text}`);
+    lastErr = text;
+    if (res.status === 401) {
+      throw new Error(
+        'El acceso a Google Drive expiró o el token no es válido. Vuelve a iniciar sesión con Google en la app y acepta los permisos de Drive.'
+      );
+    }
+    if (res.status === 403) {
+      throw new Error(
+        'Google Drive rechazó la operación (permisos). Revisa la cuenta o vuelve a conectar la app con Google.'
+      );
+    }
+    if (!driveRetryable(res.status) || attempt === DRIVE_RETRY_MAX - 1) {
+      throw new Error(`Error creando carpeta "${name}" en Drive: ${text}`);
+    }
+    await sleep(DRIVE_RETRY_BASE_MS * Math.pow(2, attempt));
   }
-
-  const data = (await res.json()) as { id: string };
-  return data;
+  throw new Error(`Error creando carpeta "${name}" en Drive: ${lastErr}`);
 }
 
 /**

@@ -47,3 +47,17 @@ export const SESSION_EXPIRED = {
 
 /** Mensaje breve para cola de sincronización / historial de errores. */
 export const SESSION_EXPIRED_SHORT = 'Sesión finalizada. Inicia sesión de nuevo con Google.';
+
+/**
+ * Errores de OAuth/permisos de Google Drive (Edge Function o mensajes propagados).
+ * No confundir con JWT de Supabase: no debe disparar cierre de sesión Supabase.
+ */
+export function isGoogleDriveAccessError(message: string | null | undefined): boolean {
+  const m = (message ?? '').toLowerCase();
+  if (!m.trim()) return false;
+  if (m.includes('el acceso a google drive expiró')) return true;
+  if (m.includes('google drive rechazó')) return true;
+  if (m.includes('se requiere acceso a google drive')) return true;
+  if (m.includes('google drive (')) return true;
+  return false;
+}

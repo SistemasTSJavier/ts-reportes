@@ -190,14 +190,22 @@ export const useAuthStore = defineStore('auth', {
     /**
      * Token de Google para Drive API: prioriza GIS (recomendado por Google para web),
      * luego `provider_token` de Supabase / caché local.
+     * @param options.interactive - solo consentimiento GIS (p. ej. tras 401 de Drive en sync).
      */
-    async ensureGoogleDriveAccessTokenForApi(): Promise<string> {
+    async ensureGoogleDriveAccessTokenForApi(options?: { interactive?: boolean }): Promise<string> {
+      const interactive = options?.interactive ?? false;
       const uid = this.userId;
       if (!uid) {
         throw new Error('Debes iniciar sesión para usar Google Drive.');
       }
 
       if (isGisConfigured()) {
+        if (interactive) {
+          const token = await requestDriveAccessTokenWithGis(true);
+          this.googleAccessToken = token;
+          this.rememberGoogleProviderToken(uid, token);
+          return token;
+        }
         try {
           const token = await requestDriveAccessTokenWithGis(false);
           this.googleAccessToken = token;
@@ -284,6 +292,14 @@ export const useAuthStore = defineStore('auth', {
           token = this.getProviderTokenFromSession(refreshed?.session);
         } catch (e) {
           console.error('Error refrescando sesión para token Google:', e);
+        }
+      }
+
+      if (!token) {
+        try {
+          token = await this.ensureGoogleDriveAccessTokenForApi();
+        } catch {
+          /* sin GIS / usuario canceló */
         }
       }
 

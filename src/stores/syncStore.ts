@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { useAuthStore } from './authStore';
-import { isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
+import { isGoogleDriveAccessError, isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -32,6 +32,16 @@ interface SyncState {
   syncing: boolean;
   history: SyncItem[];
   connectivity: 'online' | 'offline';
+  retryAttempt: number;
+  retryTimerId: number | null;
+  periodicSyncTimerId: number | null;
+}
+
+export interface ProcessQueueResult {
+  hadError: boolean;
+  lastError?: string;
+  /** Cola vacía, offline, o ya se estaba procesando */
+  skipped: boolean;
 }
 
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
@@ -62,16 +72,21 @@ async function getSupabaseJwtForEdgeFunction(auth: ReturnType<typeof useAuthStor
 }
 
 /**
- * Edge Function `generate-ctpat-pdf`: GIS/Supabase para token de Google + JWT Supabase relecto tras refresh.
+ * Edge Function `generate-ctpat-pdf`: JWT Supabase + token Google Drive del usuario (cada cuenta su Drive).
+ * Reintenta JWT Supabase ante 401 de puerta; ante error de Drive OAuth, un nuevo token GIS (consentimiento).
  */
-async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
+async function invokeGenerateCtpatPdf(
+  registroId: string,
+  options?: { googleAccessToken?: string }
+): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
 
-  const googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi();
+  let googleDriveAccessToken =
+    options?.googleAccessToken ?? (await auth.ensureGoogleDriveAccessTokenForApi());
   let jwt = await getSupabaseJwtForEdgeFunction(auth);
 
-  const runOnce = async (userJwt: string): Promise<void> => {
+  const runOnce = async (userJwt: string, accessToken: string): Promise<void> => {
     const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
     if (!baseUrl) {
       throw new Error('Falta VITE_SUPABASE_URL.');
@@ -95,7 +110,7 @@ async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
       },
       body: JSON.stringify({
         registroId,
-        accessToken: googleDriveAccessToken
+        accessToken
       })
     });
 
@@ -124,18 +139,24 @@ async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
     }
   };
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      await runOnce(jwt);
-      return;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (isSupabaseGatewayUnauthorized(message) && attempt < 4) {
-        await auth.refreshSessionForApi({ force: true });
-        jwt = await getSupabaseJwtForEdgeFunction(auth);
-        continue;
+  driveRetry: for (let driveRound = 0; driveRound < 2; driveRound++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await runOnce(jwt, googleDriveAccessToken);
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isSupabaseGatewayUnauthorized(message) && attempt < 4) {
+          await auth.refreshSessionForApi({ force: true });
+          jwt = await getSupabaseJwtForEdgeFunction(auth);
+          continue;
+        }
+        if (isGoogleDriveAccessError(message) && driveRound === 0) {
+          googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi({ interactive: true });
+          continue driveRetry;
+        }
+        throw err;
       }
-      throw err;
     }
   }
   throw new Error('generate-ctpat-pdf: reintentos agotados');
@@ -212,9 +233,25 @@ export const useSyncStore = defineStore('sync', {
     queue: [],
     syncing: false,
     history: [],
-    connectivity: navigator.onLine ? 'online' : 'offline'
+    connectivity: navigator.onLine ? 'online' : 'offline',
+    retryAttempt: 0,
+    retryTimerId: null,
+    periodicSyncTimerId: null
   }),
   actions: {
+    clearRetryTimer() {
+      if (this.retryTimerId != null) {
+        window.clearTimeout(this.retryTimerId);
+        this.retryTimerId = null;
+      }
+    },
+    scheduleRetry() {
+      this.clearRetryTimer();
+      const ms = Math.min(60000, 5000 * 2 ** Math.max(0, this.retryAttempt - 1));
+      this.retryTimerId = window.setTimeout(() => {
+        void this.processQueue();
+      }, ms);
+    },
     async updateConnectivity() {
       if (navigator.onLine) {
         this.connectivity = 'online';
@@ -312,19 +349,42 @@ export const useSyncStore = defineStore('sync', {
       this.queue.push(item);
       void this.persist();
     },
-    async processQueue() {
-      if (this.syncing || this.queue.length === 0) return;
+    async processQueue(): Promise<ProcessQueueResult> {
+      if (this.syncing) {
+        return { hadError: false, skipped: true };
+      }
+      if (this.queue.length === 0) {
+        return { hadError: false, skipped: true };
+      }
       await this.updateConnectivity();
-      if (this.connectivity !== 'online') return;
+      if (this.connectivity !== 'online') {
+        return { hadError: false, skipped: true };
+      }
 
       this.syncing = true;
       let hadSuccess = false;
+      let hadError = false;
+      let lastError: string | undefined;
 
       try {
         const authStore = useAuthStore();
         const session = await authStore.refreshSessionForApi({ force: true });
         if (!session?.access_token) {
-          return;
+          return { hadError: true, lastError: 'Sesión no válida.', skipped: false };
+        }
+
+        const queueNeedsDrivePdf = this.queue.some(
+          (q) =>
+            q.status === 'pending' &&
+            (q.kind === 'generate_pdf' || q.kind === 'create_registro_and_generate')
+        );
+        let prefetchedDriveToken: string | undefined;
+        if (queueNeedsDrivePdf) {
+          try {
+            prefetchedDriveToken = await authStore.ensureGoogleDriveAccessTokenForApi();
+          } catch {
+            prefetchedDriveToken = undefined;
+          }
         }
 
         for (const item of this.queue) {
@@ -336,7 +396,14 @@ export const useSyncStore = defineStore('sync', {
           try {
             if (item.kind === 'generate_pdf') {
               const payload = item.payload as GeneratePdfPayload;
-              await invokeGenerateCtpatPdf(payload.registroId);
+              const driveTok =
+                prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
+              await invokeGenerateCtpatPdf(payload.registroId, {
+                googleAccessToken: driveTok
+              });
+              if (authStore.googleAccessToken) {
+                prefetchedDriveToken = authStore.googleAccessToken;
+              }
 
               item.status = 'done';
               item.lastError = undefined;
@@ -372,7 +439,14 @@ export const useSyncStore = defineStore('sync', {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
 
-              await invokeGenerateCtpatPdf(inserted.id);
+              const driveTok =
+                prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
+              await invokeGenerateCtpatPdf(inserted.id, {
+                googleAccessToken: driveTok
+              });
+              if (authStore.googleAccessToken) {
+                prefetchedDriveToken = authStore.googleAccessToken;
+              }
 
               item.status = 'done';
               item.lastError = undefined;
@@ -392,14 +466,36 @@ export const useSyncStore = defineStore('sync', {
             item.lastError = message;
             item.updatedAt = new Date().toISOString();
             this.history.unshift({ ...item });
+            hadError = true;
+            lastError = message;
           }
         }
 
         this.queue = this.queue.filter((q) => q.status === 'pending' || q.status === 'error');
         await this.persist();
+        return { hadError, lastError, skipped: false };
       } finally {
         this.syncing = false;
+        if (hadSuccess) {
+          this.retryAttempt = 0;
+          this.clearRetryTimer();
+        }
+        if (hadError && this.queue.some((q) => q.status === 'error' || q.status === 'pending')) {
+          this.retryAttempt += 1;
+          this.scheduleRetry();
+        }
       }
+    },
+    async retryErroredItems() {
+      for (const item of this.queue) {
+        if (item.status === 'error') {
+          item.status = 'pending';
+          item.lastError = undefined;
+          item.updatedAt = new Date().toISOString();
+        }
+      }
+      await this.persist();
+      return this.processQueue();
     },
     attachOnlineListener() {
       window.addEventListener('offline', () => {
@@ -407,6 +503,7 @@ export const useSyncStore = defineStore('sync', {
       });
       window.addEventListener('online', () => {
         void this.updateConnectivity();
+        this.retryAttempt = 0;
         void this.processQueue();
       });
     },
@@ -419,6 +516,15 @@ export const useSyncStore = defineStore('sync', {
       });
       window.addEventListener('focus', trigger);
       window.addEventListener('pageshow', trigger);
+    },
+    attachPeriodicSync(intervalMs = 45000) {
+      if (this.periodicSyncTimerId != null) {
+        window.clearInterval(this.periodicSyncTimerId);
+      }
+      this.periodicSyncTimerId = window.setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        void this.processQueue();
+      }, intervalMs);
     }
   }
 });
