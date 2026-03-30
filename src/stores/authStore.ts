@@ -68,13 +68,17 @@ export const useAuthStore = defineStore('auth', {
           data: { session: sessionInitial }
         } = await supabase.auth.getSession();
 
-        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+        const refreshToken = sessionInitial?.refresh_token;
+        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession(
+          refreshToken ? { refresh_token: refreshToken } : undefined
+        );
         if (refreshErr) {
           console.warn('refreshSessionForApi', refreshErr.message);
           if (sessionInitial?.user) this.requireSessionRestart();
           return null;
         }
-        const session = refreshed.session ?? sessionInitial;
+        // No usar sessionInitial como sustituto del access_token: puede seguir caducado → 401 Invalid JWT.
+        const session = refreshed.session;
         if (!session?.user) {
           if (sessionInitial?.user) this.requireSessionRestart();
           return null;

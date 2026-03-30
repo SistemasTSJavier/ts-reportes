@@ -46,6 +46,127 @@ function cloneForIndexedDb<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function isLikelyJwtUnauthorizedMessage(message: string): boolean {
+  return /jwt|401|invalid token|invalid jwt/i.test(message);
+}
+
+/**
+ * Invoca `generate-ctpat-pdf` con `apikey` + JWT de usuario (requerido por la puerta de enlace de Supabase).
+ * - Si existe `VITE_SUPABASE_FUNCTIONS_URL`, usa fetch a esa base (p. ej. `*.functions.supabase.co`).
+ * - Si no, usa `supabase.functions.invoke` (URL estándar `.../functions/v1`).
+ *
+ * Reintenta una vez tras `refreshSession()` si la respuesta indica JWT inválido (p. ej. token desfasado).
+ */
+async function invokeGenerateCtpatPdf(
+  registroId: string,
+  googleDriveAccessToken: string,
+  supabaseAccessToken: string
+): Promise<void> {
+  const auth = useAuthStore();
+  const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+  const customFnBase = (import.meta.env.VITE_SUPABASE_FUNCTIONS_URL as string | undefined)
+    ?.trim()
+    .replace(/\/$/, '');
+
+  if (!supabaseAccessToken) {
+    auth.requireSessionRestart();
+    throw new Error('No hay sesión para generar el PDF.');
+  }
+
+  const jsonBody = JSON.stringify({ registroId, accessToken: googleDriveAccessToken });
+
+  const runOnce = async (userJwt: string): Promise<void> => {
+    if (customFnBase && anonKey) {
+      const res = await fetch(`${customFnBase}/generate-ctpat-pdf`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${userJwt}`,
+          apikey: anonKey
+        },
+        body: jsonBody
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        let detail = text;
+        try {
+          const j = JSON.parse(text) as { message?: string; code?: number };
+          if (j?.message) detail = j.message;
+        } catch {
+          /* keep text */
+        }
+        throw new Error(detail || `Error Edge Function (${res.status})`);
+      }
+      if (text) {
+        let j: { ok?: boolean; error?: string };
+        try {
+          j = JSON.parse(text) as { ok?: boolean; error?: string };
+        } catch {
+          return;
+        }
+        if (j.ok === false) throw new Error(j.error ?? 'Error en función');
+      }
+      return;
+    }
+
+    const { data, error } = await supabase.functions.invoke('generate-ctpat-pdf', {
+      body: { registroId, accessToken: googleDriveAccessToken },
+      headers: {
+        Authorization: `Bearer ${userJwt}`
+      }
+    });
+
+    if (error) {
+      let detail = error.message ?? '';
+      const withCtx = error as { context?: { response?: Response } };
+      const resp = withCtx.context?.response;
+      if (resp) {
+        try {
+          const t = await resp.clone().text();
+          if (t) {
+            try {
+              const j = JSON.parse(t) as { message?: string };
+              detail = j.message ?? t;
+            } catch {
+              detail = t;
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      throw new Error(detail || 'Error en Edge Function generate-ctpat-pdf');
+    }
+
+    const body = data as { ok?: boolean; error?: string } | null;
+    if (body && body.ok === false) {
+      throw new Error(body.error ?? 'Error en función');
+    }
+  };
+
+  let jwt = supabaseAccessToken;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await runOnce(jwt);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt === 0 && isLikelyJwtUnauthorizedMessage(message)) {
+        const { data, error: refreshErr } = await supabase.auth.refreshSession();
+        const next = data.session?.access_token;
+        if (!refreshErr && next) {
+          jwt = next;
+          continue;
+        }
+      }
+      if (isLikelyJwtUnauthorizedMessage(message)) {
+        auth.requireSessionRestart();
+      }
+      throw err;
+    }
+  }
+}
+
 function openSyncDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_NAME, 1);
@@ -247,25 +368,16 @@ export const useSyncStore = defineStore('sync', {
       this.syncing = true;
       let hadError = false;
       let hadSuccess = false;
-      const functionsBaseUrl =
-        import.meta.env.VITE_SUPABASE_FUNCTIONS_URL ??
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1`;
 
       try {
         const authStore = useAuthStore();
         const session = await authStore.refreshSessionForApi();
-        if (!session) {
+        if (!session?.access_token) {
           return;
         }
+        const supabaseJwt = session.access_token;
 
-        const supabaseAccessToken = session.access_token;
         const accessToken: string | undefined = authStore.googleAccessToken ?? undefined;
-
-        const looksLikeJwt = (t: string | undefined): boolean => {
-          if (!t) return false;
-          // Un JWT típico tiene 3 secciones separadas por '.'
-          return t.split('.').length === 3;
-        };
 
         for (const item of this.queue) {
           if (item.status !== 'pending') continue;
@@ -280,34 +392,9 @@ export const useSyncStore = defineStore('sync', {
                   'No hay token de Google para Drive. Cierra sesión y vuelve a iniciar con Google y acepta el acceso a Google Drive.'
                 );
               }
-              if (!supabaseAccessToken) {
-                throw new Error(
-                  'No hay token JWT de Supabase disponible. Inicia sesión nuevamente con Google.'
-                );
-              }
-              if (!looksLikeJwt(supabaseAccessToken)) {
-                throw new Error(
-                  `El token enviado no parece JWT de Supabase (empieza con: ${supabaseAccessToken.slice(
-                    0,
-                    12
-                  )}).`
-                );
-              }
 
               const payload = item.payload as GeneratePdfPayload;
-              const res = await fetch(`${functionsBaseUrl}/generate-ctpat-pdf`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${supabaseAccessToken}`
-                },
-                body: JSON.stringify({ registroId: payload.registroId, accessToken })
-              });
-
-              if (!res.ok) {
-                const text = await res.text();
-                throw new Error(text || 'Error en Edge Function');
-              }
+              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt);
 
               item.status = 'done';
               item.lastError = undefined;
@@ -351,33 +438,8 @@ export const useSyncStore = defineStore('sync', {
                   'Registro creado pero falta token de Google para Drive. Cierra sesión, inicia de nuevo con Google y acepta el acceso a Drive.'
                 );
               }
-              if (!supabaseAccessToken) {
-                throw new Error(
-                  'Registro creado pero falta el JWT de Supabase. Cierra sesión y vuelve a iniciar con Google.'
-                );
-              }
-              if (!looksLikeJwt(supabaseAccessToken)) {
-                throw new Error(
-                  `El token enviado no parece JWT de Supabase (empieza con: ${supabaseAccessToken.slice(
-                    0,
-                    12
-                  )}).`
-                );
-              }
 
-              const res = await fetch(`${functionsBaseUrl}/generate-ctpat-pdf`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${supabaseAccessToken}`
-                },
-                body: JSON.stringify({ registroId: inserted.id, accessToken })
-              });
-
-              if (!res.ok) {
-                const text = await res.text();
-                throw new Error(text || 'Error en Edge Function');
-              }
+              await invokeGenerateCtpatPdf(inserted.id, accessToken, supabaseJwt);
 
               item.status = 'done';
               item.lastError = undefined;
