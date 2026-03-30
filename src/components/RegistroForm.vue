@@ -1052,17 +1052,10 @@ async function persistRegistro() {
     const refreshed = await authStore.refreshSessionForApi();
     if (!refreshed) {
       saving.value = false;
-      if (authStore.sessionRestartRequired) {
-        toastStore.error(
-          'Sesión expirada',
-          'Usa «Reiniciar aplicación» en pantalla completa y vuelve a iniciar sesión con Google.'
-        );
-      } else {
-        toastStore.error(
-          'Sesión',
-          'Inicia sesión con Google e inténtalo de nuevo.'
-        );
-      }
+      toastStore.error(
+        'Sesión',
+        'Cierra sesión e inicia de nuevo con Google e inténtalo otra vez.'
+      );
       return;
     }
     session = refreshed;
@@ -1180,8 +1173,10 @@ async function persistRegistro() {
     const f1 = folioError1?.message ?? '';
     if (folioError1?.code === '401' || /jwt|invalid token/i.test(f1)) {
       saving.value = false;
-      authStore.requireSessionRestart();
-      toastStore.error('Sesión inválida', 'Reinicia la aplicación e inicia sesión de nuevo.');
+      toastStore.error(
+        'Sesión inválida',
+        'Cierra sesión e inicia de nuevo con Google.'
+      );
       return;
     }
     // eslint-disable-next-line no-console
@@ -1195,8 +1190,7 @@ async function persistRegistro() {
       saving.value = false;
       const f2 = folioError2?.message ?? '';
       if (folioError2?.code === '401' || /jwt|invalid token/i.test(f2)) {
-        authStore.requireSessionRestart();
-        toastStore.error('Sesión inválida', 'Reinicia la aplicación e inicia sesión de nuevo.');
+        toastStore.error('Sesión inválida', 'Cierra sesión e inicia de nuevo con Google.');
       } else {
         toastStore.error(
           'Error al generar folio',
@@ -1233,10 +1227,9 @@ async function persistRegistro() {
       error.code === '401' ||
       /jwt|invalid token/i.test(msg)
     ) {
-      authStore.requireSessionRestart();
       toastStore.error(
         'Sesión inválida',
-        'Reinicia la aplicación e inicia sesión de nuevo.'
+        'Cierra sesión e inicia de nuevo con Google.'
       );
     } else {
       toastStore.error('Error al guardar el registro', msg || 'Intenta nuevamente.');

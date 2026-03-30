@@ -311,10 +311,6 @@ async function loadRegistros() {
 
   if (error) {
     console.error('Error cargando registros', error);
-    const msg = error.message ?? '';
-    if (error.code === '401' || /jwt|invalid token/i.test(msg)) {
-      authStore.requireSessionRestart();
-    }
     registros.value = [];
   } else {
     registros.value = data ?? [];

@@ -14,16 +14,18 @@ interface AuthState {
   driveConfigRetryScheduled: boolean;
   /** Nombre de archivo del logo de servicio (p. ej. danfoss.png), desde user_drive_config */
   serviceLogoFile: string | null;
-  /**
-   * Si es true, el JWT ya no es válido y hay que recargar la página (no basta con navegar en la SPA).
-   */
-  sessionRestartRequired: boolean;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
 /** Supabase a veces omite `provider_token` tras refresh; respaldo solo para el mismo usuario. */
 const GOOGLE_PROVIDER_TOKEN_KEY = 'ts_google_provider_token_v1';
 const GOOGLE_PROVIDER_TOKEN_UID_KEY = 'ts_google_provider_token_uid_v1';
+
+/**
+ * Varios listeners (visibility + focus + cola sync) pueden llamar a refresh a la vez.
+ * Dos `refreshSession()` concurrentes invalidan el refresh token del otro → fallos y 401 Invalid JWT.
+ */
+let refreshSessionForApiMutex: Promise<Session | null> | null = null;
 
 /** Normaliza metadata/BD al nombre de archivo en public/ y en assets del PDF */
 export function normalizeServiceLogoFile(v: string | null): string {
@@ -47,22 +49,23 @@ export const useAuthStore = defineStore('auth', {
     googleAccessToken: null,
     driveConfigReady: false,
     driveConfigRetryScheduled: false,
-    serviceLogoFile: null,
-    sessionRestartRequired: false
+    serviceLogoFile: null
   }),
   actions: {
-    requireSessionRestart() {
-      this.sessionRestartRequired = true;
-    },
-    clearSessionRestartRequired() {
-      this.sessionRestartRequired = false;
-    },
     /**
      * Renueva access_token antes de RPC, REST o Edge Function (evita 401 Invalid JWT).
      * Mantiene alineado provider_token de Google con la misma lógica que la cola de sync.
+     * Las llamadas concurrentes comparten una sola promesa (mutex) para no tumbar el refresh token.
      */
     async refreshSessionForApi(): Promise<Session | null> {
-      if (this.sessionRestartRequired) return null;
+      if (!refreshSessionForApiMutex) {
+        refreshSessionForApiMutex = this.refreshSessionForApiInner().finally(() => {
+          refreshSessionForApiMutex = null;
+        });
+      }
+      return refreshSessionForApiMutex;
+    },
+    async refreshSessionForApiInner(): Promise<Session | null> {
       try {
         const {
           data: { session: sessionInitial }
@@ -74,13 +77,11 @@ export const useAuthStore = defineStore('auth', {
         );
         if (refreshErr) {
           console.warn('refreshSessionForApi', refreshErr.message);
-          if (sessionInitial?.user) this.requireSessionRestart();
           return null;
         }
         // No usar sessionInitial como sustituto del access_token: puede seguir caducado → 401 Invalid JWT.
         const session = refreshed.session;
         if (!session?.user) {
-          if (sessionInitial?.user) this.requireSessionRestart();
           return null;
         }
 
@@ -98,19 +99,8 @@ export const useAuthStore = defineStore('auth', {
         return session;
       } catch (e) {
         console.error('refreshSessionForApi', e);
-        this.requireSessionRestart();
         return null;
       }
-    },
-    /**
-     * Al volver a la pestaña / primer plano: renueva el JWT para evitar 401.
-     */
-    async refreshSessionOnForeground() {
-      if (!this.isSignedIn || this.sessionRestartRequired) return;
-      await this.refreshSessionForApi();
-    },
-    reloadApp() {
-      window.location.reload();
     },
     getProviderTokenFromSession(session: unknown): string | null {
       const token = (session as any)?.provider_token;
@@ -355,7 +345,6 @@ export const useAuthStore = defineStore('auth', {
       this.displayName = null;
       this.googleAccessToken = null;
       this.serviceLogoFile = null;
-      this.sessionRestartRequired = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       this.clearGoogleProviderTokenCache();
     }

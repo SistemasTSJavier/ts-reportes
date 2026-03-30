@@ -62,14 +62,12 @@ async function invokeGenerateCtpatPdf(
   googleDriveAccessToken: string,
   supabaseAccessToken: string
 ): Promise<void> {
-  const auth = useAuthStore();
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const customFnBase = (import.meta.env.VITE_SUPABASE_FUNCTIONS_URL as string | undefined)
     ?.trim()
     .replace(/\/$/, '');
 
   if (!supabaseAccessToken) {
-    auth.requireSessionRestart();
     throw new Error('No hay sesión para generar el PDF.');
   }
 
@@ -158,9 +156,6 @@ async function invokeGenerateCtpatPdf(
           jwt = next;
           continue;
         }
-      }
-      if (isLikelyJwtUnauthorizedMessage(message)) {
-        auth.requireSessionRestart();
       }
       throw err;
     }
@@ -360,7 +355,6 @@ export const useSyncStore = defineStore('sync', {
       void this.persist();
     },
     async processQueue() {
-      if (useAuthStore().sessionRestartRequired) return;
       if (this.syncing || this.queue.length === 0) return;
       await this.updateConnectivity();
       if (this.connectivity !== 'online') return;
