@@ -11,10 +11,15 @@ import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, degrees } from 'npm:
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
+/** PDFs por usuario; solo la Edge Function sube con service_role. */
+const PDF_STORAGE_BUCKET = 'ctpat-pdfs';
+
 interface RegistroRow {
   id: string;
   service_id: string | null;
   folio_pdf: string | null;
+  pdf_storage_path: string | null;
+  drive_file_id: string | null;
   operador: string | null;
   checklist_tracto: Record<string, unknown> | null;
   checklist_caja: Record<string, unknown> | null;
@@ -304,6 +309,42 @@ async function ensureDriveFolders(accessToken: string): Promise<{ pdfFolderId: s
   ]);
 
   return { pdfFolderId, imagesFolderId };
+}
+
+async function uploadEvidenceImagesToDrive(
+  accessToken: string,
+  data: RegistroRow,
+  imagesFolderId: string | undefined
+): Promise<{ name: string; id: string }[]> {
+  const uploadedImages: { name: string; id: string }[] = [];
+  const imageUrls = data.image_urls || [];
+
+  for (let index = 0; index < imageUrls.length; index++) {
+    const url = imageUrls[index];
+    if (!url || typeof url !== 'string') continue;
+    if (!url.startsWith('data:')) continue;
+
+    const match = url.match(/^data:(.+);base64,(.+)$/);
+    if (!match) continue;
+    const [, mimeType, base64Data] = match;
+
+    const binary = atob(base64Data);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    const imageName = `CTPAT_IMG_${data.folio_pdf || data.service_id || data.id}_${index + 1}`;
+    try {
+      const imgRes = await uploadToDrive(accessToken, imageName, bytes, mimeType, imagesFolderId);
+      uploadedImages.push({ name: imageName, id: imgRes.id as string });
+    } catch {
+      // Una imagen fallida no bloquea el resto
+    }
+  }
+
+  return uploadedImages;
 }
 
 /** Decodifica data URL (base64) y embebe la imagen en el PDF. */
@@ -2054,39 +2095,172 @@ Deno.serve(async (req) => {
 
   let registroIdForCleanup: string | null = null;
   try {
-    const { registroId, accessToken } = await req.json();
-    registroIdForCleanup = typeof registroId === 'string' ? registroId : null;
-    if (!registroId || !accessToken) {
-      return jsonError(origin, 400, 'registroId y accessToken son requeridos');
+    const body = (await req.json()) as {
+      registroId?: string;
+      accessToken?: string;
+      driveOnly?: boolean;
+    };
+    const registroId = typeof body.registroId === 'string' ? body.registroId : null;
+    const accessToken =
+      typeof body.accessToken === 'string' && body.accessToken.trim().length > 0
+        ? body.accessToken.trim()
+        : null;
+    const driveOnly = body.driveOnly === true;
+
+    if (!registroId) {
+      return jsonError(origin, 400, 'registroId es requerido');
     }
 
     const supabaseServer = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { persistSession: false }
     });
 
-    const { data, error } = await supabaseServer
+    const { data: row, error: rowErr } = await supabaseServer
       .from('registros_ctpat')
       .select('*')
       .eq('id', registroId)
       .single<RegistroRow>();
 
-    if (error || !data) {
-      return jsonError(
-        origin,
-        404,
-        `Registro no encontrado: ${error?.message ?? 'sin detalle'}`
-      );
+    if (rowErr || !row) {
+      return jsonError(origin, 404, `Registro no encontrado: ${rowErr?.message ?? 'sin detalle'}`);
     }
 
-    // Obtener configuración de Drive por usuario
-    if (!data.user_id) {
+    if (!row.user_id) {
       return jsonError(origin, 400, 'El registro no tiene user_id asociado');
     }
 
-    // Seguridad: solo permitir acciones sobre registros del usuario autenticado.
-    if (normalizeUuid(data.user_id) !== normalizeUuid(currentUserId)) {
+    if (normalizeUuid(row.user_id) !== normalizeUuid(currentUserId)) {
       return jsonError(origin, 403, 'Forbidden: registro pertenece a otro usuario');
     }
+
+    const mergeEvidencias = (
+      base: RegistroRow['evidencias_exif'],
+      uploadedImages: { name: string; id: string }[]
+    ): Record<string, unknown> => {
+      const prev =
+        base && typeof base === 'object' && !Array.isArray(base)
+          ? (base as Record<string, unknown>)
+          : {};
+      return uploadedImages.length > 0 ? { ...prev, uploadedImages } : { ...prev };
+    };
+
+    // --- Solo subir a Drive (PDF ya está en Storage) ---
+    if (driveOnly) {
+      if (!accessToken) {
+        return jsonError(origin, 400, 'accessToken es requerido para sincronizar con Drive');
+      }
+
+      const data = row;
+
+      if (data.drive_file_id) {
+        return new Response(
+          JSON.stringify({ ok: true, driveSynced: true, already: true, driveFileId: data.drive_file_id }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) }
+          }
+        );
+      }
+
+      if (!data.pdf_storage_path) {
+        return jsonError(
+          origin,
+          400,
+          'El PDF aún no está guardado en Storage. Espera a que termine la generación o reintenta.'
+        );
+      }
+
+      const { data: blob, error: dlErr } = await supabaseServer.storage
+        .from(PDF_STORAGE_BUCKET)
+        .download(data.pdf_storage_path);
+
+      if (dlErr || !blob) {
+        return jsonError(
+          origin,
+          500,
+          `No se pudo leer el PDF desde Storage: ${dlErr?.message ?? 'sin detalle'}`
+        );
+      }
+
+      const pdfBytes = new Uint8Array(await blob.arrayBuffer());
+
+      const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
+      const userMeta = authUserRow?.user?.user_metadata as Record<string, unknown> | undefined;
+
+      const { data: driveCfg, error: driveCfgError } = await supabaseServer
+        .from('user_drive_config')
+        .select('pdf_folder_id, images_folder_id, service_logo_file')
+        .eq('user_id', data.user_id)
+        .single<UserDriveConfigRow>();
+
+      let finalDriveCfg: UserDriveConfigRow | null = driveCfg ?? null;
+      if (driveCfgError || !finalDriveCfg) {
+        const { pdfFolderId, imagesFolderId } = await ensureDriveFolders(accessToken);
+        const { data: inserted, error: insertErr } = await supabaseServer
+          .from('user_drive_config')
+          .insert({
+            user_id: data.user_id,
+            pdf_folder_id: pdfFolderId,
+            images_folder_id: imagesFolderId,
+            service_logo_file: normalizeServiceLogoFile(logoFromUserMetadata(userMeta))
+          })
+          .select('pdf_folder_id, images_folder_id, service_logo_file')
+          .single<UserDriveConfigRow>();
+
+        if (!insertErr && inserted) {
+          finalDriveCfg = inserted;
+        } else {
+          finalDriveCfg = {
+            pdf_folder_id: pdfFolderId,
+            images_folder_id: imagesFolderId,
+            service_logo_file: null
+          };
+        }
+      }
+
+      const rawFolioFile = (data.folio_pdf ?? '').toString().trim();
+      const mFile = rawFolioFile.match(/^TS-0*(\d+)$/i);
+      const folioNumFile = mFile ? Number(mFile[1]) : null;
+      const folioFile = folioNumFile != null ? `TS-${folioNumFile}` : rawFolioFile || `TS-${data.id}`;
+      const fileName = `${folioFile}.pdf`;
+
+      const driveResponse = await uploadToDrive(
+        accessToken,
+        fileName,
+        pdfBytes,
+        'application/pdf',
+        finalDriveCfg?.pdf_folder_id
+      );
+      const uploadedImages = await uploadEvidenceImagesToDrive(
+        accessToken,
+        data,
+        finalDriveCfg?.images_folder_id
+      );
+      const driveId = (driveResponse as { id?: string }).id ?? null;
+
+      await supabaseServer
+        .from('registros_ctpat')
+        .update({
+          sync_status: 'synced',
+          drive_file_id: driveId,
+          evidencias_exif: mergeEvidencias(data.evidencias_exif, uploadedImages)
+        })
+        .eq('id', data.id)
+        .eq('user_id', data.user_id);
+
+      return new Response(
+        JSON.stringify({ ok: true, driveSynced: true, driveFile: driveResponse }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) }
+        }
+      );
+    }
+
+    // --- Generar PDF + Storage; Drive opcional si hay token de Google ---
+    registroIdForCleanup = registroId;
+
+    const data = row;
 
     const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
     const userMeta = authUserRow?.user?.user_metadata as Record<string, unknown> | undefined;
@@ -2097,10 +2271,8 @@ Deno.serve(async (req) => {
       .eq('user_id', data.user_id)
       .single<UserDriveConfigRow>();
 
-    // Si no existe config en BD (o está incompleta), creamos la estructura en Drive
-    // y persistimos el config con Service Role.
     let finalDriveCfg: UserDriveConfigRow | null = driveCfg ?? null;
-    if (driveCfgError || !finalDriveCfg) {
+    if (accessToken && (driveCfgError || !finalDriveCfg)) {
       const { pdfFolderId, imagesFolderId } = await ensureDriveFolders(accessToken);
       const { data: inserted, error: insertErr } = await supabaseServer
         .from('user_drive_config')
@@ -2116,7 +2288,6 @@ Deno.serve(async (req) => {
       if (!insertErr && inserted) {
         finalDriveCfg = inserted;
       } else {
-        // Si insert falla (por carrera), aún así intentamos continuar usando los ids creados.
         finalDriveCfg = {
           pdf_folder_id: pdfFolderId,
           images_folder_id: imagesFolderId,
@@ -2125,7 +2296,6 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Misma prioridad que la PWA: BD primero; si no hay logo en fila, user_metadata (Auth).
     const resolvedCenterLogo = (() => {
       const d = finalDriveCfg?.service_logo_file?.trim();
       if (d) return d;
@@ -2134,73 +2304,85 @@ Deno.serve(async (req) => {
     })();
 
     const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer);
+    const storagePath = `${data.user_id}/${data.id}.pdf`;
+
+    const { error: upErr } = await supabaseServer.storage
+      .from(PDF_STORAGE_BUCKET)
+      .upload(storagePath, pdfBytes, {
+        contentType: 'application/pdf',
+        upsert: true
+      });
+
+    if (upErr) {
+      throw new Error(`No se pudo guardar el PDF en Storage: ${upErr.message}`);
+    }
+
     const rawFolioFile = (data.folio_pdf ?? '').toString().trim();
     const mFile = rawFolioFile.match(/^TS-0*(\d+)$/i);
     const folioNumFile = mFile ? Number(mFile[1]) : null;
     const folioFile = folioNumFile != null ? `TS-${folioNumFile}` : rawFolioFile || `TS-${data.id}`;
     const fileName = `${folioFile}.pdf`;
 
-    const driveResponse = await uploadToDrive(
-      accessToken,
-      fileName,
-      pdfBytes,
-      'application/pdf',
-      finalDriveCfg?.pdf_folder_id
-    );
+    let driveResponse: unknown = null;
+    let driveSynced = false;
+    let driveError: string | undefined;
+    let uploadedImages: { name: string; id: string }[] = [];
 
-    // Subir evidencias como imágenes si vienen embebidas como data URL
-    const imageUrls = data.image_urls || [];
-    const uploadedImages: { name: string; id: string }[] = [];
-
-    for (let index = 0; index < imageUrls.length; index++) {
-      const url = imageUrls[index];
-      if (!url || typeof url !== 'string') continue;
-      if (!url.startsWith('data:')) continue;
-
-      const match = url.match(/^data:(.+);base64,(.+)$/);
-      if (!match) continue;
-      const [, mimeType, base64Data] = match;
-
-      const binary = atob(base64Data);
-      const len = binary.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-
-      const imageName = `CTPAT_IMG_${data.folio_pdf || data.service_id || data.id}_${index + 1}`;
+    if (accessToken && finalDriveCfg) {
       try {
-        const imgRes = await uploadToDrive(
+        driveResponse = await uploadToDrive(
           accessToken,
-          imageName,
-          bytes,
-          mimeType,
-          finalDriveCfg?.images_folder_id
+          fileName,
+          pdfBytes,
+          'application/pdf',
+          finalDriveCfg.pdf_folder_id
         );
-        uploadedImages.push({ name: imageName, id: imgRes.id as string });
-      } catch {
-        // Si alguna imagen falla no rompemos toda la sincronización
+        uploadedImages = await uploadEvidenceImagesToDrive(
+          accessToken,
+          data,
+          finalDriveCfg.images_folder_id
+        );
+        driveSynced = true;
+      } catch (e) {
+        console.error('Drive (opcional) tras Storage:', e);
+        driveError = e instanceof Error ? e.message : String(e);
       }
     }
 
+    const newDriveId = driveSynced ? ((driveResponse as { id?: string }).id ?? null) : data.drive_file_id;
+
     await supabaseServer
       .from('registros_ctpat')
-      .update({ sync_status: 'synced', evidencias_exif: { uploadedImages } })
+      .update({
+        sync_status: 'synced',
+        pdf_storage_path: storagePath,
+        drive_file_id: newDriveId,
+        evidencias_exif: mergeEvidencias(data.evidencias_exif, uploadedImages)
+      })
       .eq('id', data.id)
       .eq('user_id', data.user_id);
 
-    return new Response(JSON.stringify({ ok: true, driveFile: driveResponse }), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        ...corsHeaders(origin)
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        storagePath,
+        driveSynced,
+        driveError: driveError ?? null,
+        needsDriveSync: !driveSynced,
+        driveFile: driveResponse
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders(origin)
+        }
       }
-    });
+    );
   } catch (err) {
     console.error(err);
 
-    // Si falló la sincronización, marcamos el registro para que el cleanup pueda manejarlo
-    // sin borrar "pending" a destiempo.
+    // Solo si falló la generación / Storage (no el reintento solo-Drive).
     if (registroIdForCleanup) {
       try {
         const supabaseServer = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {

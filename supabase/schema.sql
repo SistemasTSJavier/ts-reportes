@@ -15,6 +15,8 @@
     comentarios_tipo text,
     evidencias_exif jsonb not null default '{}'::jsonb,
     sync_status text not null default 'pending',
+    pdf_storage_path text,
+    drive_file_id text,
     user_id uuid references auth.users (id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()

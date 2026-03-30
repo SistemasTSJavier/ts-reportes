@@ -3,7 +3,7 @@ import { supabase } from '../supabaseClient';
 import { useAuthStore } from './authStore';
 import { isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
 
-export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
+export type SyncKind = 'create_registro_and_generate' | 'generate_pdf' | 'sync_drive';
 
 export interface CreateRegistroAndGeneratePayload {
   userId: string;
@@ -56,9 +56,10 @@ function cloneForIndexedDb<T>(value: T): T {
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
-  googleDriveAccessToken: string,
-  _supabaseAccessTokenHint: string
-): Promise<void> {
+  googleDriveAccessToken: string | null | undefined,
+  _supabaseAccessTokenHint: string,
+  options?: { driveOnly?: boolean }
+): Promise<{ driveSynced: boolean; needsDriveSync: boolean }> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
 
@@ -73,7 +74,7 @@ async function invokeGenerateCtpatPdf(
     throw new Error('No hay sesión para generar el PDF. Inicia sesión de nuevo con Google.');
   }
 
-  const runOnce = async (userJwt: string): Promise<void> => {
+  const runOnce = async (userJwt: string): Promise<{ driveSynced: boolean; needsDriveSync: boolean }> => {
     const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
     if (!baseUrl) {
       throw new Error('Falta VITE_SUPABASE_URL.');
@@ -96,7 +97,8 @@ async function invokeGenerateCtpatPdf(
       },
       body: JSON.stringify({
         registroId,
-        accessToken: googleDriveAccessToken
+        accessToken: googleDriveAccessToken ?? null,
+        driveOnly: options?.driveOnly === true
       })
     });
 
@@ -112,24 +114,29 @@ async function invokeGenerateCtpatPdf(
       }
       throw new Error(detail);
     }
-
-    if (text) {
-      let parsed: { ok?: boolean; error?: string };
-      try {
-        parsed = JSON.parse(text) as { ok?: boolean; error?: string };
-      } catch {
-        return;
-      }
-      if (parsed.ok === false) {
-        throw new Error(parsed.error ?? 'Error en función');
-      }
+    if (!text.trim()) {
+      return { driveSynced: true, needsDriveSync: false };
     }
+
+    let driveSynced = true;
+    let needsDriveSync = false;
+    let parsed: { ok?: boolean; error?: string; driveSynced?: boolean; needsDriveSync?: boolean };
+    try {
+      parsed = JSON.parse(text) as { ok?: boolean; error?: string; driveSynced?: boolean; needsDriveSync?: boolean };
+    } catch {
+      return { driveSynced: true, needsDriveSync: false };
+    }
+    if (parsed.ok === false) {
+      throw new Error(parsed.error ?? 'Error en función');
+    }
+    if (typeof parsed.driveSynced === 'boolean') driveSynced = parsed.driveSynced;
+    if (typeof parsed.needsDriveSync === 'boolean') needsDriveSync = parsed.needsDriveSync;
+    return { driveSynced, needsDriveSync };
   };
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      await runOnce(jwt);
-      return;
+      return await runOnce(jwt);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Reintento solo si el fallo es claramente el JWT de Supabase (401 gateway), no errores de Drive/PDF.
@@ -145,6 +152,7 @@ async function invokeGenerateCtpatPdf(
       throw err;
     }
   }
+  throw new Error('generate-ctpat-pdf: reintentos agotados');
 }
 
 function openSyncDb(): Promise<IDBDatabase> {
@@ -339,6 +347,27 @@ export const useSyncStore = defineStore('sync', {
       this.queue.push(item);
       void this.persist();
     },
+    /** Cola aparte: subir a Drive cuando ya hay PDF en Storage (requiere token de Google). */
+    enqueueDriveSync(registroId: string) {
+      const id = `drive_${registroId}`;
+      if (
+        this.queue.some(
+          (q) => q.id === id && (q.status === 'pending' || q.status === 'processing')
+        )
+      ) {
+        return;
+      }
+      const now = new Date().toISOString();
+      const item: SyncItem = {
+        id,
+        kind: 'sync_drive',
+        payload: { registroId } satisfies DriveSyncPayload,
+        status: 'pending',
+        updatedAt: now
+      };
+      this.queue.push(item);
+      void this.persist();
+    },
     async processQueue() {
       if (this.syncing || this.queue.length === 0) return;
       await this.updateConnectivity();
@@ -365,21 +394,40 @@ export const useSyncStore = defineStore('sync', {
           await this.persist();
 
           try {
-            if (item.kind === 'generate_pdf') {
+            if (item.kind === 'sync_drive') {
               if (!accessToken) {
-                throw new Error(
-                  'No hay token de Google para Drive. Cierra sesión y vuelve a iniciar con Google y acepta el acceso a Google Drive.'
-                );
+                item.status = 'pending';
+                item.updatedAt = new Date().toISOString();
+                await this.persist();
+                continue;
               }
-
-              const payload = item.payload as GeneratePdfPayload;
-              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt);
+              const payload = item.payload as DriveSyncPayload;
+              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt, {
+                driveOnly: true
+              });
 
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
               this.history.unshift({ ...item });
               hadSuccess = true;
+            } else if (item.kind === 'generate_pdf') {
+              const payload = item.payload as GeneratePdfPayload;
+              const result = await invokeGenerateCtpatPdf(
+                payload.registroId,
+                accessToken ?? null,
+                supabaseJwt
+              );
+
+              item.status = 'done';
+              item.lastError = undefined;
+              item.updatedAt = new Date().toISOString();
+              this.history.unshift({ ...item });
+              hadSuccess = true;
+
+              if (result.needsDriveSync) {
+                this.enqueueDriveSync(payload.registroId);
+              }
             } else if (item.kind === 'create_registro_and_generate') {
               // 1) Generar folio
               const payload = item.payload as CreateRegistroAndGeneratePayload;
@@ -411,14 +459,12 @@ export const useSyncStore = defineStore('sync', {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
 
-              // 3) Generar PDF (Edge Function) usando el token Google
-              if (!accessToken) {
-                throw new Error(
-                  'Registro creado pero falta token de Google para Drive. Cierra sesión, inicia de nuevo con Google y acepta el acceso a Drive.'
-                );
-              }
-
-              await invokeGenerateCtpatPdf(inserted.id, accessToken, supabaseJwt);
+              // 3) Generar PDF + Storage (Drive opcional si hay token de Google)
+              const pdfResult = await invokeGenerateCtpatPdf(
+                inserted.id,
+                accessToken ?? null,
+                supabaseJwt
+              );
 
               item.status = 'done';
               item.lastError = undefined;
@@ -431,6 +477,10 @@ export const useSyncStore = defineStore('sync', {
                 } satisfies GeneratePdfPayload
               });
               hadSuccess = true;
+
+              if (pdfResult.needsDriveSync) {
+                this.enqueueDriveSync(inserted.id);
+              }
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -453,6 +503,13 @@ export const useSyncStore = defineStore('sync', {
         if (hadError && this.queue.some((q) => q.status === 'error' || q.status === 'pending')) {
           this.retryAttempt += 1;
           this.scheduleRetry();
+        }
+        const auth = useAuthStore();
+        const chainDrive =
+          this.queue.some((q) => q.kind === 'sync_drive' && q.status === 'pending') &&
+          !!auth.googleAccessToken;
+        if (chainDrive) {
+          void this.processQueue();
         }
       }
     },
