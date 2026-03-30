@@ -27,6 +27,29 @@ const GOOGLE_PROVIDER_TOKEN_UID_KEY = 'ts_google_provider_token_uid_v1';
  */
 let refreshSessionForApiMutex: Promise<Session | null> | null = null;
 
+/** `exp` del JWT (segundos UNIX). */
+function accessTokenExp(accessToken: string | undefined): number | null {
+  if (!accessToken) return null;
+  try {
+    const parts = accessToken.split('.');
+    if (parts.length !== 3) return null;
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const payload = JSON.parse(atob(b64)) as { exp?: number };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Si falta `exp` o caduca en menos de `skewSec`, hay que refrescar. */
+function shouldRefreshAccessToken(accessToken: string | undefined, skewSec = 120): boolean {
+  const exp = accessTokenExp(accessToken);
+  if (exp == null) return true;
+  const now = Math.floor(Date.now() / 1000);
+  return exp - now < skewSec;
+}
+
 /** Normaliza metadata/BD al nombre de archivo en public/ y en assets del PDF */
 export function normalizeServiceLogoFile(v: string | null): string {
   if (!v) return 'caterpillar.png';
@@ -57,46 +80,81 @@ export const useAuthStore = defineStore('auth', {
      * Mantiene alineado provider_token de Google con la misma lógica que la cola de sync.
      * Las llamadas concurrentes comparten una sola promesa (mutex) para no tumbar el refresh token.
      */
-    async refreshSessionForApi(): Promise<Session | null> {
+    async refreshSessionForApi(options?: { force?: boolean }): Promise<Session | null> {
       if (!refreshSessionForApiMutex) {
-        refreshSessionForApiMutex = this.refreshSessionForApiInner().finally(() => {
+        refreshSessionForApiMutex = this.refreshSessionForApiInner(options).finally(() => {
           refreshSessionForApiMutex = null;
         });
       }
       return refreshSessionForApiMutex;
     },
-    async refreshSessionForApiInner(): Promise<Session | null> {
+    /**
+     * `force`: siempre llama a `refreshSession` si hay refresh_token (p. ej. tras 401 en Edge Function).
+     * Si no, solo refresca cuando el access token falta o está a punto de caducar (evita rotar tokens en cada acción).
+     */
+    async refreshSessionForApiInner(options?: { force?: boolean }): Promise<Session | null> {
+      const force = options?.force ?? false;
       try {
         const {
-          data: { session: sessionInitial }
+          data: { session: s0 }
         } = await supabase.auth.getSession();
+        if (!s0?.user) return null;
 
-        const refreshToken = sessionInitial?.refresh_token;
-        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession(
-          refreshToken ? { refresh_token: refreshToken } : undefined
-        );
-        if (refreshErr) {
-          console.warn('refreshSessionForApi', refreshErr.message);
-          return null;
-        }
-        // No usar sessionInitial como sustituto del access_token: puede seguir caducado → 401 Invalid JWT.
-        const session = refreshed.session;
-        if (!session?.user) {
-          return null;
+        const needsRefresh =
+          force || !s0.access_token || shouldRefreshAccessToken(s0.access_token, 120);
+
+        let session: Session | null = s0;
+
+        if (needsRefresh) {
+          const rt = s0.refresh_token;
+          if (!rt) return null;
+          const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession({
+            refresh_token: rt
+          });
+          if (refreshErr) {
+            console.warn('refreshSessionForApi', refreshErr.message);
+            return null;
+          }
+          session = refreshed.session ?? null;
+          if (!session?.user) return null;
         }
 
         const uid = session.user.id;
-        const googleFromRefresh = this.getProviderTokenFromSession(session);
-        const googleFromInitial = this.getProviderTokenFromSession(sessionInitial);
+        const googleFromSession = this.getProviderTokenFromSession(session);
+        const googleFromInitial = this.getProviderTokenFromSession(s0);
         const google =
-          googleFromRefresh ??
+          googleFromSession ??
           googleFromInitial ??
           this.getGoogleProviderTokenFallback(uid) ??
           null;
         this.googleAccessToken = google;
         if (google) this.rememberGoogleProviderToken(uid, google);
 
-        return session;
+        const gu1 = await supabase.auth.getUser();
+        if (gu1.error || !gu1.data.user) {
+          console.warn('getUser tras preparar sesión', gu1.error?.message);
+          const { data: cur } = await supabase.auth.getSession();
+          const rtRecover = cur.session?.refresh_token;
+          if (!rtRecover) return null;
+          const { data: refreshed2, error: e2 } = await supabase.auth.refreshSession({
+            refresh_token: rtRecover
+          });
+          if (e2 || !refreshed2.session?.user) return null;
+          const s = refreshed2.session;
+          const uid2 = s.user.id;
+          this.googleAccessToken =
+            this.getProviderTokenFromSession(s) ??
+            this.getGoogleProviderTokenFallback(uid2) ??
+            this.googleAccessToken;
+          if (this.googleAccessToken) this.rememberGoogleProviderToken(uid2, this.googleAccessToken);
+          const gu2 = await supabase.auth.getUser();
+          if (gu2.error || !gu2.data.user) return null;
+        }
+
+        const {
+          data: { session: latest }
+        } = await supabase.auth.getSession();
+        return latest ?? session;
       } catch (e) {
         console.error('refreshSessionForApi', e);
         return null;

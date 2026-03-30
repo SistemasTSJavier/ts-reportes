@@ -55,7 +55,7 @@ function isLikelyJwtUnauthorizedMessage(message: string): boolean {
  * - Si existe `VITE_SUPABASE_FUNCTIONS_URL`, usa fetch a esa base (p. ej. `*.functions.supabase.co`).
  * - Si no, usa `supabase.functions.invoke` (URL estándar `.../functions/v1`).
  *
- * Reintenta una vez tras `refreshSession()` si la respuesta indica JWT inválido (p. ej. token desfasado).
+ * Reintenta una vez tras `refreshSessionForApi({ force: true })` (mismo mutex que el resto de la app).
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
@@ -150,9 +150,9 @@ async function invokeGenerateCtpatPdf(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (attempt === 0 && isLikelyJwtUnauthorizedMessage(message)) {
-        const { data, error: refreshErr } = await supabase.auth.refreshSession();
-        const next = data.session?.access_token;
-        if (!refreshErr && next) {
+        const recovered = await useAuthStore().refreshSessionForApi({ force: true });
+        const next = recovered?.access_token;
+        if (next) {
           jwt = next;
           continue;
         }
