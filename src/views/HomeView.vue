@@ -192,6 +192,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
@@ -311,6 +312,9 @@ async function loadRegistros() {
 
   if (error) {
     console.error('Error cargando registros', error);
+    if (isSessionExpiredError(error.message, error.code)) {
+      await authStore.signOutDueToExpiredSession();
+    }
     registros.value = [];
   } else {
     registros.value = data ?? [];

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { useAuthStore } from './authStore';
+import { isSessionExpiredError, SESSION_EXPIRED_SHORT } from '../utils/supabaseAuthErrors';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -46,8 +47,29 @@ function cloneForIndexedDb<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function isLikelyJwtUnauthorizedMessage(message: string): boolean {
-  return /jwt|401|invalid token|invalid jwt/i.test(message);
+/** `FunctionsHttpError.context` es el `Response` (no `{ response }`). */
+async function messageFromFunctionsInvokeError(error: unknown): Promise<string> {
+  const fallback = error instanceof Error ? error.message : String(error);
+  const ctx = (error as { context?: unknown }).context;
+  if (!(ctx instanceof Response)) {
+    return fallback;
+  }
+  try {
+    const status = ctx.status;
+    const text = await ctx.clone().text();
+    if (text) {
+      try {
+        const j = JSON.parse(text) as { message?: string; error?: string; details?: string };
+        const inner = j.message ?? j.error ?? j.details ?? text;
+        return `HTTP ${status}: ${inner}`;
+      } catch {
+        return `HTTP ${status}: ${text}`;
+      }
+    }
+    return `HTTP ${status} ${fallback}`;
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -78,24 +100,7 @@ async function invokeGenerateCtpatPdf(
     });
 
     if (error) {
-      let detail = error.message ?? '';
-      const withCtx = error as { context?: { response?: Response } };
-      const resp = withCtx.context?.response;
-      if (resp) {
-        try {
-          const t = await resp.clone().text();
-          if (t) {
-            try {
-              const j = JSON.parse(t) as { message?: string };
-              detail = j.message ?? t;
-            } catch {
-              detail = t;
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-      }
+      const detail = await messageFromFunctionsInvokeError(error);
       throw new Error(detail || 'Error en Edge Function generate-ctpat-pdf');
     }
 
@@ -106,19 +111,26 @@ async function invokeGenerateCtpatPdf(
   };
 
   let jwt = supabaseAccessToken;
+  const auth = useAuthStore();
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await runOnce(jwt);
       return;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (attempt === 0 && isLikelyJwtUnauthorizedMessage(message)) {
-        const recovered = await useAuthStore().refreshSessionForApi({ force: true });
+      if (attempt === 0 && isSessionExpiredError(message)) {
+        const recovered = await auth.refreshSessionForApi({ force: true });
         const next = recovered?.access_token;
         if (next) {
           jwt = next;
           continue;
         }
+        await auth.signOutDueToExpiredSession();
+        throw new Error(SESSION_EXPIRED_SHORT);
+      }
+      if (isSessionExpiredError(message)) {
+        await auth.signOutDueToExpiredSession();
+        throw new Error(SESSION_EXPIRED_SHORT);
       }
       throw err;
     }

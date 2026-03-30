@@ -1921,6 +1921,29 @@ function corsHeaders(origin: string | null): HeadersInit {
   };
 }
 
+/** JWT `sub` y UUID de Postgres deben compararse en la misma forma (evita 403 fantasma). */
+function normalizeUuid(s: string | null | undefined): string {
+  return (s ?? '').trim().toLowerCase();
+}
+
+function jsonError(
+  origin: string | null,
+  status: number,
+  message: string,
+  extra?: Record<string, unknown>
+): Response {
+  return new Response(
+    JSON.stringify({ ok: false, error: message, ...extra }),
+    {
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+        ...corsHeaders(origin)
+      }
+    }
+  );
+}
+
 Deno.serve(async (req) => {
   const origin = req.headers.get('origin');
 
@@ -1932,10 +1955,7 @@ Deno.serve(async (req) => {
   }
 
   if (req.method !== 'POST') {
-    return new Response('Método no permitido', {
-      status: 405,
-      headers: corsHeaders(origin)
-    });
+    return jsonError(origin, 405, 'Método no permitido');
   }
 
   // La Edge Function requiere JWT válido de Supabase.
@@ -1967,10 +1987,7 @@ Deno.serve(async (req) => {
     const { registroId, accessToken } = await req.json();
     registroIdForCleanup = typeof registroId === 'string' ? registroId : null;
     if (!registroId || !accessToken) {
-      return new Response('registroId y accessToken son requeridos', {
-        status: 400,
-        headers: corsHeaders(origin)
-      });
+      return jsonError(origin, 400, 'registroId y accessToken son requeridos');
     }
 
     const supabaseServer = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -1984,29 +2001,21 @@ Deno.serve(async (req) => {
       .single<RegistroRow>();
 
     if (error || !data) {
-      return new Response(`Registro no encontrado: ${error?.message ?? 'sin detalle'}`, {
-        status: 404,
-        headers: corsHeaders(origin)
-      });
+      return jsonError(
+        origin,
+        404,
+        `Registro no encontrado: ${error?.message ?? 'sin detalle'}`
+      );
     }
 
     // Obtener configuración de Drive por usuario
     if (!data.user_id) {
-      return new Response('El registro no tiene user_id asociado', {
-        status: 400,
-        headers: corsHeaders(origin)
-      });
+      return jsonError(origin, 400, 'El registro no tiene user_id asociado');
     }
 
     // Seguridad: solo permitir acciones sobre registros del usuario autenticado.
-    if (data.user_id !== currentUserId) {
-      return new Response(JSON.stringify({ ok: false, error: 'Forbidden: registro pertenece a otro usuario' }), {
-        status: 403,
-        headers: {
-          'Content-Type': 'application/json',
-          ...corsHeaders(origin)
-        }
-      });
+    if (normalizeUuid(data.user_id) !== normalizeUuid(currentUserId)) {
+      return jsonError(origin, 403, 'Forbidden: registro pertenece a otro usuario');
     }
 
     const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
@@ -2108,7 +2117,7 @@ Deno.serve(async (req) => {
       .from('registros_ctpat')
       .update({ sync_status: 'synced', evidencias_exif: { uploadedImages } })
       .eq('id', data.id)
-      .eq('user_id', currentUserId);
+      .eq('user_id', data.user_id);
 
     return new Response(JSON.stringify({ ok: true, driveFile: driveResponse }), {
       status: 200,

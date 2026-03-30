@@ -2,6 +2,8 @@ import type { Session } from '@supabase/supabase-js';
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { ensureDriveFolders } from '../services/driveService';
+import { SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
+import { useToastStore } from './toastStore';
 
 interface AuthState {
   isSignedIn: boolean;
@@ -405,6 +407,15 @@ export const useAuthStore = defineStore('auth', {
       this.serviceLogoFile = null;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       this.clearGoogleProviderTokenCache();
+    },
+    /**
+     * Cierra sesión y avisa con un mensaje claro (sin códigos 401/JWT crudos).
+     * Usar cuando la API indique sesión inválida o expirada.
+     */
+    async signOutDueToExpiredSession() {
+      const toast = useToastStore();
+      toast.error(SESSION_EXPIRED.title, SESSION_EXPIRED.message);
+      await this.signOut();
     }
   }
 });

@@ -538,6 +538,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { VueSignaturePad } from 'vue-signature-pad';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
+import { isSessionExpiredError, SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { useToastStore } from '../stores/toastStore';
 import { useSyncStore } from '../stores/syncStore';
@@ -1053,8 +1054,8 @@ async function persistRegistro() {
     if (!refreshed) {
       saving.value = false;
       toastStore.error(
-        'Sesión',
-        'Cierra sesión e inicia de nuevo con Google e inténtalo otra vez.'
+        SESSION_EXPIRED.title,
+        'No se pudo validar la sesión. Comprueba la conexión o vuelve a entrar con Google.'
       );
       return;
     }
@@ -1171,12 +1172,9 @@ async function persistRegistro() {
     folioAuto = folioData1 as string;
   } else {
     const f1 = folioError1?.message ?? '';
-    if (folioError1?.code === '401' || /jwt|invalid token/i.test(f1)) {
+    if (isSessionExpiredError(folioError1?.message, folioError1?.code)) {
       saving.value = false;
-      toastStore.error(
-        'Sesión inválida',
-        'Cierra sesión e inicia de nuevo con Google.'
-      );
+      await authStore.signOutDueToExpiredSession();
       return;
     }
     // eslint-disable-next-line no-console
@@ -1189,8 +1187,8 @@ async function persistRegistro() {
       console.error('Error generando folio automático (fallback)', folioError2);
       saving.value = false;
       const f2 = folioError2?.message ?? '';
-      if (folioError2?.code === '401' || /jwt|invalid token/i.test(f2)) {
-        toastStore.error('Sesión inválida', 'Cierra sesión e inicia de nuevo con Google.');
+      if (isSessionExpiredError(folioError2?.message, folioError2?.code)) {
+        await authStore.signOutDueToExpiredSession();
       } else {
         toastStore.error(
           'Error al generar folio',
@@ -1223,14 +1221,8 @@ async function persistRegistro() {
     // eslint-disable-next-line no-console
     console.error('Error insert registro', error);
     const msg = error.message ?? '';
-    if (
-      error.code === '401' ||
-      /jwt|invalid token/i.test(msg)
-    ) {
-      toastStore.error(
-        'Sesión inválida',
-        'Cierra sesión e inicia de nuevo con Google.'
-      );
+    if (isSessionExpiredError(msg, error.code)) {
+      await authStore.signOutDueToExpiredSession();
     } else {
       toastStore.error('Error al guardar el registro', msg || 'Intenta nuevamente.');
     }
