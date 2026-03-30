@@ -1,7 +1,13 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
+import { loadGoogleIdentityServices } from '../services/googleIdentityDrive';
 import { useAuthStore } from './authStore';
-import { isGoogleDriveAccessError, isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
+import {
+  isGoogleDriveAccessError,
+  isSessionExpiredError,
+  isSupabaseGatewayUnauthorized,
+  SESSION_EXPIRED_SHORT
+} from '../utils/supabaseAuthErrors';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -44,6 +50,11 @@ export interface ProcessQueueResult {
   skipped: boolean;
 }
 
+export interface ProcessQueueOptions {
+  /** true si la llamada viene de un clic («Sincronizar ahora» / «Reintentar»). Necesario para abrir el popup de Google sin bloqueo. */
+  fromUserGesture?: boolean;
+}
+
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
 const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
 const IDB_NAME = 'ts_ctpat_sync_db_v1';
@@ -77,13 +88,15 @@ async function getSupabaseJwtForEdgeFunction(auth: ReturnType<typeof useAuthStor
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
-  options?: { googleAccessToken?: string }
+  options?: { googleAccessToken?: string; fromUserGesture?: boolean }
 ): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
+  const fromUserGesture = options?.fromUserGesture === true;
 
   let googleDriveAccessToken =
-    options?.googleAccessToken ?? (await auth.ensureGoogleDriveAccessTokenForApi());
+    options?.googleAccessToken ??
+    (await auth.ensureGoogleDriveAccessTokenForApi({ fromUserGesture }));
   let jwt = await getSupabaseJwtForEdgeFunction(auth);
 
   const runOnce = async (userJwt: string, accessToken: string): Promise<void> => {
@@ -152,14 +165,32 @@ async function invokeGenerateCtpatPdf(
           continue;
         }
         if (isGoogleDriveAccessError(message) && driveRound === 0) {
-          googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi({ interactive: true });
-          continue driveRetry;
+          if (fromUserGesture) {
+            googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi({
+              interactive: true,
+              fromUserGesture: true
+            });
+            continue driveRetry;
+          }
+          throw new Error(
+            'Google Drive necesita autorizar de nuevo. Pulsa «Sincronizar ahora» o «Reintentar» en Inicio y permite ventanas emergentes para este sitio.'
+          );
         }
         throw err;
       }
     }
   }
   throw new Error('generate-ctpat-pdf: reintentos agotados');
+}
+
+function shouldInvalidateLocalSession(message: string): boolean {
+  if (isSessionExpiredError(message)) return true;
+  const m = message.toLowerCase();
+  return (
+    (m.includes('no hay sesión') && m.includes('google')) ||
+    (m.includes('jwt') && m.includes('refresh')) ||
+    m.includes('invalid refresh token')
+  );
 }
 
 function openSyncDb(): Promise<IDBDatabase> {
@@ -319,6 +350,17 @@ export const useSyncStore = defineStore('sync', {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.queue));
       localStorage.setItem(HISTORY_KEY, JSON.stringify(this.history));
     },
+    /**
+     * JWT inválido (p. ej. usuario borrado en Supabase, refresh revocado): limpia cola local y cierra sesión.
+     */
+    async handleSessionInvalidated() {
+      this.clearRetryTimer();
+      this.retryAttempt = 0;
+      this.queue = [];
+      await this.persist();
+      const auth = useAuthStore();
+      await auth.signOutDueToExpiredSession();
+    },
     enqueueCreateRegistroAndGenerate(payload: CreateRegistroAndGeneratePayload) {
       const now = new Date().toISOString();
       const id = `create_${payload.userId}_${Date.now()}`;
@@ -349,17 +391,20 @@ export const useSyncStore = defineStore('sync', {
       this.queue.push(item);
       void this.persist();
     },
-    async processQueue(): Promise<ProcessQueueResult> {
+    async processQueue(options?: ProcessQueueOptions): Promise<ProcessQueueResult> {
       if (this.syncing) {
         return { hadError: false, skipped: true };
       }
       if (this.queue.length === 0) {
         return { hadError: false, skipped: true };
       }
-      await this.updateConnectivity();
-      if (this.connectivity !== 'online') {
-        return { hadError: false, skipped: true };
-      }
+
+      const fromUserGesture = options?.fromUserGesture === true;
+      const queueNeedsDrivePdf = this.queue.some(
+        (q) =>
+          q.status === 'pending' &&
+          (q.kind === 'generate_pdf' || q.kind === 'create_registro_and_generate')
+      );
 
       this.syncing = true;
       let hadSuccess = false;
@@ -368,22 +413,41 @@ export const useSyncStore = defineStore('sync', {
 
       try {
         const authStore = useAuthStore();
+
+        // Popup de GIS solo funciona si hay gesto del usuario; adelantamos Drive antes de otros await largos.
+        if (fromUserGesture && queueNeedsDrivePdf && navigator.onLine) {
+          try {
+            await loadGoogleIdentityServices();
+            await authStore.ensureGoogleDriveAccessTokenForApi({ fromUserGesture: true });
+          } catch {
+            /* sigue con token silencioso / Supabase más abajo */
+          }
+        }
+
+        await this.updateConnectivity();
+        if (this.connectivity !== 'online') {
+          return { hadError: false, skipped: true };
+        }
+
         const session = await authStore.refreshSessionForApi({ force: true });
         if (!session?.access_token) {
+          if (navigator.onLine && this.connectivity === 'online') {
+            await this.handleSessionInvalidated();
+            return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
+          }
           return { hadError: true, lastError: 'Sesión no válida.', skipped: false };
         }
 
-        const queueNeedsDrivePdf = this.queue.some(
-          (q) =>
-            q.status === 'pending' &&
-            (q.kind === 'generate_pdf' || q.kind === 'create_registro_and_generate')
-        );
         let prefetchedDriveToken: string | undefined;
         if (queueNeedsDrivePdf) {
-          try {
-            prefetchedDriveToken = await authStore.ensureGoogleDriveAccessTokenForApi();
-          } catch {
-            prefetchedDriveToken = undefined;
+          if (authStore.googleAccessToken) {
+            prefetchedDriveToken = authStore.googleAccessToken;
+          } else {
+            try {
+              prefetchedDriveToken = await authStore.ensureGoogleDriveAccessTokenForApi();
+            } catch {
+              prefetchedDriveToken = undefined;
+            }
           }
         }
 
@@ -399,7 +463,8 @@ export const useSyncStore = defineStore('sync', {
               const driveTok =
                 prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
               await invokeGenerateCtpatPdf(payload.registroId, {
-                googleAccessToken: driveTok
+                googleAccessToken: driveTok,
+                fromUserGesture
               });
               if (authStore.googleAccessToken) {
                 prefetchedDriveToken = authStore.googleAccessToken;
@@ -417,6 +482,12 @@ export const useSyncStore = defineStore('sync', {
                 p_user_id: payload.userId
               });
 
+              if (folioErr) {
+                if (isSessionExpiredError(folioErr.message, folioErr.code)) {
+                  await this.handleSessionInvalidated();
+                  return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
+                }
+              }
               if (folioErr || !folioData) {
                 throw new Error(`No se pudo generar folio automático: ${folioErr?.message ?? 'sin detalle'}`);
               }
@@ -435,6 +506,12 @@ export const useSyncStore = defineStore('sync', {
                 .select('id, created_at, folio_pdf')
                 .single();
 
+              if (insertErr) {
+                if (isSessionExpiredError(insertErr.message, insertErr.code)) {
+                  await this.handleSessionInvalidated();
+                  return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
+                }
+              }
               if (insertErr || !inserted) {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
@@ -442,7 +519,8 @@ export const useSyncStore = defineStore('sync', {
               const driveTok =
                 prefetchedDriveToken ?? authStore.googleAccessToken ?? undefined;
               await invokeGenerateCtpatPdf(inserted.id, {
-                googleAccessToken: driveTok
+                googleAccessToken: driveTok,
+                fromUserGesture
               });
               if (authStore.googleAccessToken) {
                 prefetchedDriveToken = authStore.googleAccessToken;
@@ -462,6 +540,10 @@ export const useSyncStore = defineStore('sync', {
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
+            if (shouldInvalidateLocalSession(message)) {
+              await this.handleSessionInvalidated();
+              return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
+            }
             item.status = 'error';
             item.lastError = message;
             item.updatedAt = new Date().toISOString();
@@ -486,7 +568,7 @@ export const useSyncStore = defineStore('sync', {
         }
       }
     },
-    async retryErroredItems() {
+    async retryErroredItems(opts?: ProcessQueueOptions) {
       for (const item of this.queue) {
         if (item.status === 'error') {
           item.status = 'pending';
@@ -495,7 +577,7 @@ export const useSyncStore = defineStore('sync', {
         }
       }
       await this.persist();
-      return this.processQueue();
+      return this.processQueue(opts);
     },
     attachOnlineListener() {
       window.addEventListener('offline', () => {

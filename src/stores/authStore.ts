@@ -2,7 +2,11 @@ import type { Session } from '@supabase/supabase-js';
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { ensureDriveFolders } from '../services/driveService';
-import { isGisConfigured, requestDriveAccessTokenWithGis } from '../services/googleIdentityDrive';
+import {
+  DRIVE_POPUP_BLOCKED_MESSAGE,
+  isGisConfigured,
+  requestDriveAccessTokenWithGis
+} from '../services/googleIdentityDrive';
 import { SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
 import { useToastStore } from './toastStore';
 
@@ -190,10 +194,14 @@ export const useAuthStore = defineStore('auth', {
     /**
      * Token de Google para Drive API: prioriza GIS (recomendado por Google para web),
      * luego `provider_token` de Supabase / caché local.
-     * @param options.interactive - solo consentimiento GIS (p. ej. tras 401 de Drive en sync).
+     * El popup de GIS solo debe abrirse tras un gesto del usuario (`fromUserGesture`); si no, el navegador lo bloquea.
+     * @param options.interactive - consentimiento GIS explícito (requiere fromUserGesture).
      */
-    async ensureGoogleDriveAccessTokenForApi(options?: { interactive?: boolean }): Promise<string> {
+    async ensureGoogleDriveAccessTokenForApi(
+      options?: { interactive?: boolean; fromUserGesture?: boolean }
+    ): Promise<string> {
       const interactive = options?.interactive ?? false;
+      const fromUserGesture = options?.fromUserGesture === true;
       const uid = this.userId;
       if (!uid) {
         throw new Error('Debes iniciar sesión para usar Google Drive.');
@@ -201,6 +209,11 @@ export const useAuthStore = defineStore('auth', {
 
       if (isGisConfigured()) {
         if (interactive) {
+          if (!fromUserGesture) {
+            throw new Error(
+              'Google Drive requiere autorizar en esta pantalla. Pulsa «Sincronizar ahora» o «Reintentar» en Inicio.'
+            );
+          }
           const token = await requestDriveAccessTokenWithGis(true);
           this.googleAccessToken = token;
           this.rememberGoogleProviderToken(uid, token);
@@ -213,13 +226,15 @@ export const useAuthStore = defineStore('auth', {
           return token;
         } catch (e1) {
           console.warn('[Drive] GIS sin prompt:', e1);
-          try {
-            const token = await requestDriveAccessTokenWithGis(true);
-            this.googleAccessToken = token;
-            this.rememberGoogleProviderToken(uid, token);
-            return token;
-          } catch (e2) {
-            console.warn('[Drive] GIS con consentimiento:', e2);
+          if (fromUserGesture) {
+            try {
+              const token = await requestDriveAccessTokenWithGis(true);
+              this.googleAccessToken = token;
+              this.rememberGoogleProviderToken(uid, token);
+              return token;
+            } catch (e2) {
+              console.warn('[Drive] GIS con consentimiento:', e2);
+            }
           }
         }
       }
@@ -235,7 +250,9 @@ export const useAuthStore = defineStore('auth', {
       if (!token) {
         throw new Error(
           isGisConfigured()
-            ? 'No se pudo obtener acceso a Google Drive. Inténtalo de nuevo.'
+            ? fromUserGesture
+              ? DRIVE_POPUP_BLOCKED_MESSAGE
+              : 'No se pudo acceder a Google Drive en segundo plano. Pulsa «Sincronizar ahora» o «Reintentar» en Inicio para autorizar.'
             : 'No hay token de Google para Drive. Añade VITE_GOOGLE_OAUTH_CLIENT_ID (Client ID web) o vuelve a iniciar sesión con Google y acepta permisos de Drive.'
         );
       }

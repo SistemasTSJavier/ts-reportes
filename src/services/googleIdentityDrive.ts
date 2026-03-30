@@ -38,6 +38,10 @@ const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive'
 ].join(' ');
 
+/** Mensaje cuando el navegador bloquea el popup de OAuth (GIS). */
+export const DRIVE_POPUP_BLOCKED_MESSAGE =
+  'El navegador bloqueó la ventana de Google. Permite ventanas emergentes para este sitio (icono junto a la barra de direcciones) y vuelve a pulsar «Sincronizar ahora» o «Reintentar».';
+
 let gisLoadPromise: Promise<void> | null = null;
 
 export function getGoogleOAuthClientId(): string | undefined {
@@ -81,9 +85,17 @@ export async function loadGoogleIdentityServices(): Promise<void> {
   return gisLoadPromise;
 }
 
+function mapGisCallbackError(raw: string): string {
+  const m = raw.toLowerCase();
+  if (m.includes('popup') || m.includes('blocked') || m.includes('failed to open')) {
+    return DRIVE_POPUP_BLOCKED_MESSAGE;
+  }
+  return raw;
+}
+
 /**
  * Obtiene un access_token de Google con permisos de Drive.
- * @param interactive - si true, fuerza flujo donde el usuario puede volver a consentir (útil tras 401 de Google).
+ * @param interactive - si true, fuerza consentimiento (solo debe usarse tras un clic del usuario; si no, el popup suele bloquearse).
  */
 export async function requestDriveAccessTokenWithGis(interactive: boolean): Promise<string> {
   const clientId = getGoogleOAuthClientId();
@@ -102,7 +114,8 @@ export async function requestDriveAccessTokenWithGis(interactive: boolean): Prom
       scope: DRIVE_SCOPES,
       callback: (resp: GisTokenResponse) => {
         if (resp.error) {
-          reject(new Error(resp.error_description ?? resp.error));
+          const detail = resp.error_description ?? resp.error;
+          reject(new Error(mapGisCallbackError(detail)));
           return;
         }
         if (!resp.access_token?.trim()) {
@@ -112,6 +125,10 @@ export async function requestDriveAccessTokenWithGis(interactive: boolean): Prom
         resolve(resp.access_token.trim());
       }
     });
-    client.requestAccessToken(interactive ? { prompt: 'consent' } : {});
+    try {
+      client.requestAccessToken(interactive ? { prompt: 'consent' } : {});
+    } catch (e) {
+      reject(e instanceof Error ? new Error(mapGisCallbackError(e.message)) : e);
+    }
   });
 }
