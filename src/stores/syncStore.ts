@@ -44,23 +44,32 @@ function cloneForIndexedDb<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/** JWT de usuario listo para la puerta de Edge Functions (evita carrera tras refresh). */
+async function getSupabaseJwtForEdgeFunction(auth: ReturnType<typeof useAuthStore>): Promise<string> {
+  await auth.refreshSessionForApi({ force: true });
+  const { data: s1, error: e1 } = await supabase.auth.getSession();
+  if (e1) throw new Error(`Sesión: ${e1.message}`);
+  let token = s1.session?.access_token?.trim();
+  if (!token) {
+    await new Promise((r) => setTimeout(r, 120));
+    const { data: s2 } = await supabase.auth.getSession();
+    token = s2.session?.access_token?.trim();
+  }
+  if (!token) {
+    throw new Error('No hay sesión para generar el PDF. Inicia sesión de nuevo con Google.');
+  }
+  return token;
+}
+
 /**
- * Llama a la Edge Function con `fetch` y headers explícitos.
- * Reintento solo ante 401 de JWT de Supabase en la puerta (no cola aparte).
+ * Edge Function `generate-ctpat-pdf`: GIS/Supabase para token de Google + JWT Supabase relecto tras refresh.
  */
-async function invokeGenerateCtpatPdf(
-  registroId: string,
-  googleDriveAccessToken: string,
-  _supabaseAccessTokenHint: string
-): Promise<void> {
+async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
 
-  const freshFirst = await auth.refreshSessionForApi({ force: true });
-  let jwt = freshFirst?.access_token ?? _supabaseAccessTokenHint;
-  if (!jwt) {
-    throw new Error('No hay sesión para generar el PDF. Inicia sesión de nuevo con Google.');
-  }
+  const googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi();
+  let jwt = await getSupabaseJwtForEdgeFunction(auth);
 
   const runOnce = async (userJwt: string): Promise<void> => {
     const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
@@ -81,7 +90,8 @@ async function invokeGenerateCtpatPdf(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${trimmedJwt}`,
-        apikey: anonKey
+        apikey: anonKey,
+        'X-Client-Info': 'ts-ctpat-pwa'
       },
       body: JSON.stringify({
         registroId,
@@ -114,19 +124,16 @@ async function invokeGenerateCtpatPdf(
     }
   };
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await runOnce(jwt);
       return;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (isSupabaseGatewayUnauthorized(message) && attempt < 2) {
-        const recovered = await auth.refreshSessionForApi({ force: true });
-        const next = recovered?.access_token;
-        if (next) {
-          jwt = next;
-          continue;
-        }
+      if (isSupabaseGatewayUnauthorized(message) && attempt < 4) {
+        await auth.refreshSessionForApi({ force: true });
+        jwt = await getSupabaseJwtForEdgeFunction(auth);
+        continue;
       }
       throw err;
     }
@@ -319,9 +326,6 @@ export const useSyncStore = defineStore('sync', {
         if (!session?.access_token) {
           return;
         }
-        const supabaseJwt = session.access_token;
-
-        const accessToken: string | undefined = authStore.googleAccessToken ?? undefined;
 
         for (const item of this.queue) {
           if (item.status !== 'pending') continue;
@@ -331,13 +335,8 @@ export const useSyncStore = defineStore('sync', {
 
           try {
             if (item.kind === 'generate_pdf') {
-              if (!accessToken) {
-                throw new Error(
-                  'No hay token de Google para Drive. Cierra sesión e inicia de nuevo con Google y acepta el acceso a Google Drive.'
-                );
-              }
               const payload = item.payload as GeneratePdfPayload;
-              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt);
+              await invokeGenerateCtpatPdf(payload.registroId);
 
               item.status = 'done';
               item.lastError = undefined;
@@ -345,12 +344,6 @@ export const useSyncStore = defineStore('sync', {
               this.history.unshift({ ...item });
               hadSuccess = true;
             } else if (item.kind === 'create_registro_and_generate') {
-              if (!accessToken) {
-                throw new Error(
-                  'Hace falta Google Drive para crear el registro y subirlo a servicios. Cierra sesión e inicia de nuevo con Google y acepta permisos de Drive.'
-                );
-              }
-
               const payload = item.payload as CreateRegistroAndGeneratePayload;
 
               const { data: folioData, error: folioErr } = await supabase.rpc('next_folio_ctpat', {
@@ -379,7 +372,7 @@ export const useSyncStore = defineStore('sync', {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
 
-              await invokeGenerateCtpatPdf(inserted.id, accessToken, supabaseJwt);
+              await invokeGenerateCtpatPdf(inserted.id);
 
               item.status = 'done';
               item.lastError = undefined;
