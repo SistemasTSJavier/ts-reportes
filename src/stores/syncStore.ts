@@ -77,17 +77,25 @@ async function messageFromFunctionsInvokeError(error: unknown): Promise<string> 
  * No uses `VITE_SUPABASE_FUNCTIONS_URL` con `*.functions.supabase.co`: a menudo provoca 401 aunque el JWT sea válido
  * para `*.supabase.co`.
  *
- * Reintenta una vez tras `refreshSessionForApi({ force: true })` (mismo mutex que el resto de la app).
+ * Refresco forzado al entrar + hasta 2 reintentos si la puerta devuelve 401 Invalid JWT.
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
   googleDriveAccessToken: string,
-  supabaseAccessToken: string
+  _supabaseAccessTokenHint: string
 ): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+  const auth = useAuthStore();
 
-  if (!supabaseAccessToken) {
-    throw new Error('No hay sesión para generar el PDF.');
+  /**
+   * Siempre pedimos un access_token recién emitido antes de la Edge Function.
+   * Si solo usáramos el JWT del inicio de processQueue, la puerta de enlace puede responder
+   * 401 Invalid JWT aunque el token local parezca válido (desfase o rotación).
+   */
+  const freshFirst = await auth.refreshSessionForApi({ force: true });
+  let jwt = freshFirst?.access_token ?? _supabaseAccessTokenHint;
+  if (!jwt) {
+    throw new Error('No hay sesión para generar el PDF. Inicia sesión de nuevo con Google.');
   }
 
   const runOnce = async (userJwt: string): Promise<void> => {
@@ -110,9 +118,7 @@ async function invokeGenerateCtpatPdf(
     }
   };
 
-  let jwt = supabaseAccessToken;
-  const auth = useAuthStore();
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await runOnce(jwt);
       return;
@@ -120,7 +126,7 @@ async function invokeGenerateCtpatPdf(
       const message = err instanceof Error ? err.message : String(err);
       // Reintento solo si el fallo es claramente el JWT de Supabase (401 gateway), no errores de Drive/PDF.
       // Nunca cerramos sesión aquí: el registro ya puede estar guardado; Drive/Google falla aparte.
-      if (attempt === 0 && isSupabaseGatewayUnauthorized(message)) {
+      if (isSupabaseGatewayUnauthorized(message) && attempt < 2) {
         const recovered = await auth.refreshSessionForApi({ force: true });
         const next = recovered?.access_token;
         if (next) {
