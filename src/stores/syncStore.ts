@@ -3,7 +3,7 @@ import { supabase } from '../supabaseClient';
 import { useAuthStore } from './authStore';
 import { isSupabaseGatewayUnauthorized } from '../utils/supabaseAuthErrors';
 
-export type SyncKind = 'create_registro_and_generate' | 'generate_pdf' | 'sync_drive';
+export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
 export interface CreateRegistroAndGeneratePayload {
   userId: string;
@@ -32,9 +32,6 @@ interface SyncState {
   syncing: boolean;
   history: SyncItem[];
   connectivity: 'online' | 'offline';
-  retryAttempt: number;
-  retryTimerId: number | null;
-  periodicSyncTimerId: number | null;
 }
 
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
@@ -49,32 +46,23 @@ function cloneForIndexedDb<T>(value: T): T {
 
 /**
  * Llama a la Edge Function con `fetch` y headers explícitos.
- * `supabase.functions.invoke` a veces no envía bien `Authorization` y la API responde
- * `401 Missing authorization header`.
- *
- * Refresco forzado al entrar + reintentos si la puerta devuelve 401 de sesión.
+ * Reintento solo ante 401 de JWT de Supabase en la puerta (no cola aparte).
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
-  googleDriveAccessToken: string | null | undefined,
-  _supabaseAccessTokenHint: string,
-  options?: { driveOnly?: boolean }
-): Promise<{ driveSynced: boolean; needsDriveSync: boolean }> {
+  googleDriveAccessToken: string,
+  _supabaseAccessTokenHint: string
+): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
 
-  /**
-   * Siempre pedimos un access_token recién emitido antes de la Edge Function.
-   * Si solo usáramos el JWT del inicio de processQueue, la puerta de enlace puede responder
-   * 401 Invalid JWT aunque el token local parezca válido (desfase o rotación).
-   */
   const freshFirst = await auth.refreshSessionForApi({ force: true });
   let jwt = freshFirst?.access_token ?? _supabaseAccessTokenHint;
   if (!jwt) {
     throw new Error('No hay sesión para generar el PDF. Inicia sesión de nuevo con Google.');
   }
 
-  const runOnce = async (userJwt: string): Promise<{ driveSynced: boolean; needsDriveSync: boolean }> => {
+  const runOnce = async (userJwt: string): Promise<void> => {
     const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
     if (!baseUrl) {
       throw new Error('Falta VITE_SUPABASE_URL.');
@@ -97,8 +85,7 @@ async function invokeGenerateCtpatPdf(
       },
       body: JSON.stringify({
         registroId,
-        accessToken: googleDriveAccessToken ?? null,
-        driveOnly: options?.driveOnly === true
+        accessToken: googleDriveAccessToken
       })
     });
 
@@ -114,33 +101,25 @@ async function invokeGenerateCtpatPdf(
       }
       throw new Error(detail);
     }
-    if (!text.trim()) {
-      return { driveSynced: true, needsDriveSync: false };
-    }
+    if (!text.trim()) return;
 
-    let driveSynced = true;
-    let needsDriveSync = false;
-    let parsed: { ok?: boolean; error?: string; driveSynced?: boolean; needsDriveSync?: boolean };
+    let parsed: { ok?: boolean; error?: string };
     try {
-      parsed = JSON.parse(text) as { ok?: boolean; error?: string; driveSynced?: boolean; needsDriveSync?: boolean };
+      parsed = JSON.parse(text) as { ok?: boolean; error?: string };
     } catch {
-      return { driveSynced: true, needsDriveSync: false };
+      return;
     }
     if (parsed.ok === false) {
       throw new Error(parsed.error ?? 'Error en función');
     }
-    if (typeof parsed.driveSynced === 'boolean') driveSynced = parsed.driveSynced;
-    if (typeof parsed.needsDriveSync === 'boolean') needsDriveSync = parsed.needsDriveSync;
-    return { driveSynced, needsDriveSync };
   };
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await runOnce(jwt);
+      await runOnce(jwt);
+      return;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Reintento solo si el fallo es claramente el JWT de Supabase (401 gateway), no errores de Drive/PDF.
-      // Nunca cerramos sesión aquí: el registro ya puede estar guardado; Drive/Google falla aparte.
       if (isSupabaseGatewayUnauthorized(message) && attempt < 2) {
         const recovered = await auth.refreshSessionForApi({ force: true });
         const next = recovered?.access_token;
@@ -203,20 +182,22 @@ function idbSet<T>(key: string, value: T): Promise<void> {
 
 function normalizeQueueItems(parsed: unknown): SyncItem[] {
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((it: any) => {
-    if (it?.kind) return it as SyncItem;
-    // Estructura antigua: { id, payload: { id, createdAt, folio }, status... }
-    const registroId = it?.payload?.id;
-    const folio = it?.payload?.folio;
-    return {
-      id: it?.id ?? registroId ?? String(Date.now()),
-      kind: 'generate_pdf',
-      payload: { registroId, folio } satisfies GeneratePdfPayload,
-      status: it?.status ?? 'pending',
-      lastError: it?.lastError,
-      updatedAt: it?.updatedAt ?? new Date().toISOString()
-    } satisfies SyncItem;
-  });
+  return parsed
+    .map((it: any) => {
+      if (it?.kind === 'sync_drive') return null;
+      if (it?.kind) return it as SyncItem;
+      const registroId = it?.payload?.id;
+      const folio = it?.payload?.folio;
+      return {
+        id: it?.id ?? registroId ?? String(Date.now()),
+        kind: 'generate_pdf',
+        payload: { registroId, folio } satisfies GeneratePdfPayload,
+        status: it?.status ?? 'pending',
+        lastError: it?.lastError,
+        updatedAt: it?.updatedAt ?? new Date().toISOString()
+      } satisfies SyncItem;
+    })
+    .filter((x): x is SyncItem => x != null);
 }
 
 export const useSyncStore = defineStore('sync', {
@@ -224,28 +205,15 @@ export const useSyncStore = defineStore('sync', {
     queue: [],
     syncing: false,
     history: [],
-    connectivity: navigator.onLine ? 'online' : 'offline',
-    retryAttempt: 0,
-    retryTimerId: null,
-    periodicSyncTimerId: null
+    connectivity: navigator.onLine ? 'online' : 'offline'
   }),
   actions: {
-    clearRetryTimer() {
-      if (this.retryTimerId != null) {
-        window.clearTimeout(this.retryTimerId);
-        this.retryTimerId = null;
-      }
-    },
     async updateConnectivity() {
-      // Híbrido para Android/PWA: `navigator.onLine` puede quedar desfasado.
-      // 1) Si el SO reporta online, tomamos online.
       if (navigator.onLine) {
         this.connectivity = 'online';
         return;
       }
 
-      // 2) Si reporta offline, validamos reachability real a Supabase con timeout.
-      // Esto destraba casos donde el navegador marca offline erróneamente.
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), 4000);
       try {
@@ -261,13 +229,6 @@ export const useSyncStore = defineStore('sync', {
         window.clearTimeout(timer);
       }
     },
-    scheduleRetry() {
-      this.clearRetryTimer();
-      const ms = Math.min(60000, 5000 * 2 ** Math.max(0, this.retryAttempt - 1));
-      this.retryTimerId = window.setTimeout(() => {
-        void this.processQueue();
-      }, ms);
-    },
     async loadFromStorage() {
       try {
         const queueFromDb = await idbGet<SyncItem[]>(STORAGE_KEY);
@@ -280,7 +241,6 @@ export const useSyncStore = defineStore('sync', {
           this.history = Array.isArray(historyFromDb) ? historyFromDb : [];
         }
 
-        // Migración automática desde localStorage -> IndexedDB.
         if (!queueFromDb) {
           const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) {
@@ -296,7 +256,6 @@ export const useSyncStore = defineStore('sync', {
           }
         }
       } catch (e) {
-        // Fallback a localStorage si IndexedDB no está disponible.
         console.warn('SyncStore: IndexedDB no disponible, usando localStorage', e);
         const raw = localStorage.getItem(STORAGE_KEY);
         const rawHistory = localStorage.getItem(HISTORY_KEY);
@@ -311,7 +270,6 @@ export const useSyncStore = defineStore('sync', {
           idbSet(HISTORY_KEY, cloneForIndexedDb(this.history))
         ]);
       } catch (e) {
-        // Fallback para navegadores restringidos.
         console.warn('SyncStore: error guardando en IndexedDB, usando localStorage', e);
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.queue));
@@ -347,39 +305,16 @@ export const useSyncStore = defineStore('sync', {
       this.queue.push(item);
       void this.persist();
     },
-    /** Cola aparte: subir a Drive cuando ya hay PDF en Storage (requiere token de Google). */
-    enqueueDriveSync(registroId: string) {
-      const id = `drive_${registroId}`;
-      if (
-        this.queue.some(
-          (q) => q.id === id && (q.status === 'pending' || q.status === 'processing')
-        )
-      ) {
-        return;
-      }
-      const now = new Date().toISOString();
-      const item: SyncItem = {
-        id,
-        kind: 'sync_drive',
-        payload: { registroId } satisfies DriveSyncPayload,
-        status: 'pending',
-        updatedAt: now
-      };
-      this.queue.push(item);
-      void this.persist();
-    },
     async processQueue() {
       if (this.syncing || this.queue.length === 0) return;
       await this.updateConnectivity();
       if (this.connectivity !== 'online') return;
 
       this.syncing = true;
-      let hadError = false;
       let hadSuccess = false;
 
       try {
         const authStore = useAuthStore();
-        // Refresco fuerte para alinear JWT Supabase y provider_token de Google antes de Drive.
         const session = await authStore.refreshSessionForApi({ force: true });
         if (!session?.access_token) {
           return;
@@ -395,50 +330,29 @@ export const useSyncStore = defineStore('sync', {
           await this.persist();
 
           try {
-            if (item.kind === 'sync_drive') {
+            if (item.kind === 'generate_pdf') {
               if (!accessToken) {
-                item.status = 'pending';
-                item.updatedAt = new Date().toISOString();
-                await this.persist();
-                continue;
+                throw new Error(
+                  'No hay token de Google para Drive. Cierra sesión e inicia de nuevo con Google y acepta el acceso a Google Drive.'
+                );
               }
-              const payload = item.payload as DriveSyncPayload;
-              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt, {
-                driveOnly: true
-              });
-
-              item.status = 'done';
-              item.lastError = undefined;
-              item.updatedAt = new Date().toISOString();
-              this.history.unshift({ ...item });
-              hadSuccess = true;
-            } else if (item.kind === 'generate_pdf') {
               const payload = item.payload as GeneratePdfPayload;
-              const result = await invokeGenerateCtpatPdf(
-                payload.registroId,
-                accessToken ?? null,
-                supabaseJwt
-              );
+              await invokeGenerateCtpatPdf(payload.registroId, accessToken, supabaseJwt);
 
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
               this.history.unshift({ ...item });
               hadSuccess = true;
-
-              if (result.needsDriveSync) {
-                this.enqueueDriveSync(payload.registroId);
-              }
             } else if (item.kind === 'create_registro_and_generate') {
               if (!accessToken) {
                 throw new Error(
-                  'Hace falta Google Drive para crear el registro y enviarlo a servicios. Cierra sesión e inicia de nuevo con Google y acepta permisos de Drive.'
+                  'Hace falta Google Drive para crear el registro y subirlo a servicios. Cierra sesión e inicia de nuevo con Google y acepta permisos de Drive.'
                 );
               }
 
               const payload = item.payload as CreateRegistroAndGeneratePayload;
 
-              // 1) Generar folio
               const { data: folioData, error: folioErr } = await supabase.rpc('next_folio_ctpat', {
                 p_user_id: payload.userId
               });
@@ -449,7 +363,6 @@ export const useSyncStore = defineStore('sync', {
 
               const folioAuto = folioData as string;
 
-              // 2) Insertar registro en BD
               const insertPayload = {
                 ...payload.insertPayloadBase,
                 folio_pdf: folioAuto,
@@ -466,7 +379,6 @@ export const useSyncStore = defineStore('sync', {
                 throw new Error(`Error insertando registro: ${insertErr?.message ?? 'sin detalle'}`);
               }
 
-              // 3) PDF a Drive primero (servicios), luego respaldo en Storage (Edge Function)
               await invokeGenerateCtpatPdf(inserted.id, accessToken, supabaseJwt);
 
               item.status = 'done';
@@ -487,7 +399,6 @@ export const useSyncStore = defineStore('sync', {
             item.lastError = message;
             item.updatedAt = new Date().toISOString();
             this.history.unshift({ ...item });
-            hadError = true;
           }
         }
 
@@ -495,33 +406,7 @@ export const useSyncStore = defineStore('sync', {
         await this.persist();
       } finally {
         this.syncing = false;
-        if (hadSuccess) {
-          this.retryAttempt = 0;
-          this.clearRetryTimer();
-        }
-        if (hadError && this.queue.some((q) => q.status === 'error' || q.status === 'pending')) {
-          this.retryAttempt += 1;
-          this.scheduleRetry();
-        }
-        const auth = useAuthStore();
-        const chainDrive =
-          this.queue.some((q) => q.kind === 'sync_drive' && q.status === 'pending') &&
-          !!auth.googleAccessToken;
-        if (chainDrive) {
-          void this.processQueue();
-        }
       }
-    },
-    async retryErroredItems() {
-      for (const item of this.queue) {
-        if (item.status === 'error') {
-          item.status = 'pending';
-          item.lastError = undefined;
-          item.updatedAt = new Date().toISOString();
-        }
-      }
-      await this.persist();
-      await this.processQueue();
     },
     attachOnlineListener() {
       window.addEventListener('offline', () => {
@@ -529,7 +414,6 @@ export const useSyncStore = defineStore('sync', {
       });
       window.addEventListener('online', () => {
         void this.updateConnectivity();
-        this.retryAttempt = 0;
         void this.processQueue();
       });
     },
@@ -542,17 +426,6 @@ export const useSyncStore = defineStore('sync', {
       });
       window.addEventListener('focus', trigger);
       window.addEventListener('pageshow', trigger);
-    },
-    attachPeriodicSync(intervalMs = 45000) {
-      if (this.periodicSyncTimerId != null) {
-        window.clearInterval(this.periodicSyncTimerId);
-      }
-      this.periodicSyncTimerId = window.setInterval(() => {
-        if (document.visibilityState !== 'visible') return;
-        // Intentamos siempre; processQueue decide según `updateConnectivity`.
-        void this.processQueue();
-      }, intervalMs);
     }
   }
 });
-

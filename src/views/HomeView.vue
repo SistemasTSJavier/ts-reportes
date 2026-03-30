@@ -27,29 +27,12 @@
           {{ syncStatusText }}
         </span>
         <button
-          v-if="erroredSyncCount > 0"
-          type="button"
-          class="text-xs text-tactical-blue font-semibold hover:underline"
-          @click="retrySyncErrors"
-        >
-          Reintentar sincronización ({{ erroredSyncCount }})
-        </button>
-        <button
           v-if="pwa.isInstallable && !pwa.isStandalone"
           type="button"
           class="text-xs text-emerald-700 font-semibold hover:underline"
           @click="installPwa"
         >
           Instalar app en Android
-        </button>
-        <button
-          v-if="syncQueueItems.length > 0"
-          type="button"
-          class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
-          :disabled="syncStore.syncing || syncStore.connectivity === 'offline'"
-          @click="syncNow"
-        >
-          {{ syncStore.syncing ? 'Sincronizando...' : 'Sincronizar ahora' }}
         </button>
         <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
           <button
@@ -68,72 +51,13 @@
           </button>
         </div>
       </div>
-    </section>
-
-    <section class="card p-4 sm:p-5">
-      <div class="flex items-center justify-between gap-3 mb-3">
-        <h3 class="text-base font-semibold text-slate-800">Cola offline</h3>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-slate-500">Total: {{ syncQueueItems.length }}</span>
-          <button
-            v-if="erroredSyncCount > 0"
-            type="button"
-            class="text-xs text-rose-700 font-semibold hover:underline"
-            @click="clearSyncErrors"
-          >
-            Limpiar errores
-          </button>
-        </div>
-      </div>
-
-      <div class="mb-3 inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
-        <button
-          v-for="opt in queueFilterOptions"
-          :key="opt.value"
-          type="button"
-          class="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors"
-          :class="
-            queueFilter === opt.value
-              ? 'bg-tactical-blue text-white shadow-sm'
-              : 'text-slate-600 hover:text-slate-800 hover:bg-white'
-          "
-          @click="queueFilter = opt.value"
-        >
-          {{ opt.label }} ({{ queueFilterCount(opt.value) }})
-        </button>
-      </div>
-
-      <div v-if="filteredSyncQueueItems.length === 0" class="text-sm text-slate-500">
-        No hay elementos en cola.
-      </div>
-
-      <ul v-else class="space-y-2">
-        <li
-          v-for="item in filteredSyncQueueItems"
-          :key="item.id"
-          class="rounded-lg border border-slate-200 p-3 bg-white"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <p class="text-sm font-semibold text-slate-800 truncate">
-                {{ syncItemTitle(item) }}
-              </p>
-              <p class="text-xs text-slate-500 mt-1">
-                Actualizado: {{ formatSyncDate(item.updatedAt) }}
-              </p>
-              <p v-if="item.lastError" class="text-xs text-rose-700 mt-1 break-words">
-                Error: {{ item.lastError }}
-              </p>
-            </div>
-            <span
-              class="shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold"
-              :class="syncItemBadgeClass(item.status)"
-            >
-              {{ syncItemStatusText(item.status) }}
-            </span>
-          </div>
-        </li>
-      </ul>
+      <p
+        v-if="syncErrorMessage"
+        class="mt-3 text-sm text-rose-700 break-words"
+        role="alert"
+      >
+        {{ syncErrorMessage }}
+      </p>
     </section>
 
     <!-- Lista de registros por folio -->
@@ -195,7 +119,7 @@ import { supabase } from '../supabaseClient';
 import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
-import { useSyncStore, type SyncKind } from '../stores/syncStore';
+import { useSyncStore } from '../stores/syncStore';
 import { useToastStore } from '../stores/toastStore';
 
 const router = useRouter();
@@ -203,7 +127,6 @@ const authStore = useAuthStore();
 const syncStore = useSyncStore();
 const pwa = usePwaStore();
 const toastStore = useToastStore();
-const queueFilter = ref<'all' | 'pending' | 'error'>('all');
 
 const movementFilter = ref<'all' | 'entrada' | 'salida'>('all');
 const registros = ref<Array<{
@@ -337,10 +260,6 @@ function goNew() {
   router.push({ name: 'registro-new' });
 }
 
-function retrySyncErrors() {
-  void syncStore.retryErroredItems();
-}
-
 async function installPwa() {
   const outcome = await pwa.promptInstall();
   if (outcome === 'accepted') {
@@ -350,47 +269,5 @@ async function installPwa() {
   if (outcome === 'dismissed') {
     toastStore.info('Instalación cancelada', 'Puedes intentarlo nuevamente cuando quieras.');
   }
-}
-
-function syncNow() {
-  void syncStore.processQueue();
-}
-
-function clearSyncErrors() {
-  syncStore.queue = syncStore.queue.filter((q) => q.status !== 'error');
-  void syncStore.persist();
-}
-
-function syncItemStatusText(status: QueueRow['status']): string {
-  if (status === 'pending') return 'Pendiente';
-  if (status === 'processing') return 'Procesando';
-  if (status === 'done') return 'Completado';
-  return 'Error';
-}
-
-function syncItemBadgeClass(status: QueueRow['status']): string {
-  if (status === 'pending') return 'bg-amber-100 text-amber-800';
-  if (status === 'processing') return 'bg-blue-100 text-blue-800';
-  if (status === 'done') return 'bg-emerald-100 text-emerald-800';
-  return 'bg-rose-100 text-rose-800';
-}
-
-function syncItemTitle(item: QueueRow): string {
-  if (item.kind === 'create_registro_and_generate') return 'Crear registro + generar PDF';
-  return 'Generar PDF existente';
-}
-
-function formatSyncDate(value: string): string {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString();
-}
-
-function queueFilterCount(filter: 'all' | 'pending' | 'error'): number {
-  if (filter === 'all') return syncQueueItems.value.length;
-  if (filter === 'pending') {
-    return syncQueueItems.value.filter((q) => q.status === 'pending' || q.status === 'processing').length;
-  }
-  return syncQueueItems.value.filter((q) => q.status === 'error').length;
 }
 </script>

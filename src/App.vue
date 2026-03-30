@@ -101,7 +101,6 @@ onMounted(() => {
     await sync.loadFromStorage();
     sync.attachOnlineListener();
     sync.attachLifecycleListeners();
-    sync.attachPeriodicSync(45000);
     if (navigator.onLine) {
       await sync.processQueue();
     }
