@@ -387,10 +387,22 @@ export const useAuthStore = defineStore('auth', {
         // Si falla por CORS/red, no dejamos la UI bloqueada en loading.
         console.error('Error initSession:', e);
         // En modo offline mantenemos cache de identidad para permitir cola local.
-        this.isSignedIn = !!this.userId;
-        this.googleAccessToken = null;
-        if (this.userId) {
-          this.scheduleDriveConfigRetry();
+        // Si hay internet, no conservamos cache para evitar bucles 401/Invalid JWT.
+        if (navigator.onLine) {
+          this.isSignedIn = false;
+          this.userId = null;
+          this.email = null;
+          this.displayName = null;
+          this.googleAccessToken = null;
+          this.serviceLogoFile = null;
+          localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
+          this.clearGoogleProviderTokenCache();
+        } else {
+          this.isSignedIn = !!this.userId;
+          this.googleAccessToken = null;
+          if (this.userId) {
+            this.scheduleDriveConfigRetry();
+          }
         }
       } finally {
         this.loading = false;

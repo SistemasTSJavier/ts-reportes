@@ -242,7 +242,16 @@ async function loadRegistros() {
   if (navigator.onLine) {
     await authStore.refreshSessionForApi();
   }
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+    error: userErr
+  } = await supabase.auth.getUser();
+  if (userErr && isSessionExpiredError(userErr.message, userErr.code)) {
+    await authStore.signOutDueToExpiredSession();
+    registros.value = [];
+    loadingRegistros.value = false;
+    return;
+  }
   if (!user?.id) {
     registros.value = [];
     loadingRegistros.value = false;
