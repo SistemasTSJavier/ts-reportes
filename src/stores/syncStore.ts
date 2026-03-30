@@ -47,37 +47,12 @@ function cloneForIndexedDb<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/** `FunctionsHttpError.context` es el `Response` (no `{ response }`). */
-async function messageFromFunctionsInvokeError(error: unknown): Promise<string> {
-  const fallback = error instanceof Error ? error.message : String(error);
-  const ctx = (error as { context?: unknown }).context;
-  if (!(ctx instanceof Response)) {
-    return fallback;
-  }
-  try {
-    const status = ctx.status;
-    const text = await ctx.clone().text();
-    if (text) {
-      try {
-        const j = JSON.parse(text) as { message?: string; error?: string; details?: string };
-        const inner = j.message ?? j.error ?? j.details ?? text;
-        return `HTTP ${status}: ${inner}`;
-      } catch {
-        return `HTTP ${status}: ${text}`;
-      }
-    }
-    return `HTTP ${status} ${fallback}`;
-  } catch {
-    return fallback;
-  }
-}
-
 /**
- * Invoca `generate-ctpat-pdf` vía `supabase.functions.invoke` (misma base que `VITE_SUPABASE_URL` → `.../functions/v1`).
- * No uses `VITE_SUPABASE_FUNCTIONS_URL` con `*.functions.supabase.co`: a menudo provoca 401 aunque el JWT sea válido
- * para `*.supabase.co`.
+ * Llama a la Edge Function con `fetch` y headers explícitos.
+ * `supabase.functions.invoke` a veces no envía bien `Authorization` y la API responde
+ * `401 Missing authorization header`.
  *
- * Refresco forzado al entrar + hasta 2 reintentos si la puerta devuelve 401 Invalid JWT.
+ * Refresco forzado al entrar + reintentos si la puerta devuelve 401 de sesión.
  */
 async function invokeGenerateCtpatPdf(
   registroId: string,
@@ -99,22 +74,55 @@ async function invokeGenerateCtpatPdf(
   }
 
   const runOnce = async (userJwt: string): Promise<void> => {
-    const { data, error } = await supabase.functions.invoke('generate-ctpat-pdf', {
-      body: { registroId, accessToken: googleDriveAccessToken },
-      headers: {
-        Authorization: `Bearer ${userJwt}`,
-        ...(anonKey ? { apikey: anonKey } : {})
-      }
-    });
-
-    if (error) {
-      const detail = await messageFromFunctionsInvokeError(error);
-      throw new Error(detail || 'Error en Edge Function generate-ctpat-pdf');
+    const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
+    if (!baseUrl) {
+      throw new Error('Falta VITE_SUPABASE_URL.');
+    }
+    if (!anonKey) {
+      throw new Error('Falta VITE_SUPABASE_ANON_KEY en el entorno de la app.');
+    }
+    const trimmedJwt = userJwt.trim();
+    if (!trimmedJwt) {
+      throw new Error('No hay token de sesión para llamar a la función.');
     }
 
-    const body = data as { ok?: boolean; error?: string } | null;
-    if (body && body.ok === false) {
-      throw new Error(body.error ?? 'Error en función');
+    const url = `${baseUrl}/functions/v1/generate-ctpat-pdf`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${trimmedJwt}`,
+        apikey: anonKey
+      },
+      body: JSON.stringify({
+        registroId,
+        accessToken: googleDriveAccessToken
+      })
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      let detail = text;
+      try {
+        const j = JSON.parse(text) as { message?: string; code?: number };
+        const inner = j?.message ?? text;
+        detail = `HTTP ${res.status}: ${inner}`;
+      } catch {
+        detail = text ? `HTTP ${res.status}: ${text}` : `HTTP ${res.status}`;
+      }
+      throw new Error(detail);
+    }
+
+    if (text) {
+      let parsed: { ok?: boolean; error?: string };
+      try {
+        parsed = JSON.parse(text) as { ok?: boolean; error?: string };
+      } catch {
+        return;
+      }
+      if (parsed.ok === false) {
+        throw new Error(parsed.error ?? 'Error en función');
+      }
     }
   };
 

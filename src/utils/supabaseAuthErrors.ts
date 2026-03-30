@@ -31,7 +31,11 @@ export function isSessionExpiredError(
  */
 export function isSupabaseGatewayUnauthorized(message: string | null | undefined): boolean {
   const m = (message ?? '').toLowerCase();
-  return /\binvalid jwt\b/.test(m) || (m.includes('http 401:') && m.includes('jwt'));
+  return (
+    /\binvalid jwt\b/.test(m) ||
+    m.includes('missing authorization') ||
+    (m.includes('http 401:') && (m.includes('jwt') || m.includes('authorization')))
+  );
 }
 
 /** Texto para toasts (sin códigos HTTP). */
