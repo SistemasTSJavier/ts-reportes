@@ -22,6 +22,14 @@ export function getSupabaseProjectRef(url: string): string | null {
 export function warnIfSupabaseFunctionsEnvMismatch(): void {
   const base = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
   const fn = (import.meta.env.VITE_SUPABASE_FUNCTIONS_URL as string | undefined)?.trim();
+  if (fn) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[Supabase] VITE_SUPABASE_FUNCTIONS_URL está definida pero ya no se usa en la app. ' +
+        'Las Edge Functions se llaman con la misma base que VITE_SUPABASE_URL (`.../functions/v1`). ' +
+        'Bórrala en Vercel/.env; si apunta a `*.functions.supabase.co` puede causar 401 en la función.'
+    );
+  }
   if (!base || !fn) return;
 
   const refBase = getSupabaseProjectRef(base);
@@ -31,7 +39,7 @@ export function warnIfSupabaseFunctionsEnvMismatch(): void {
   // eslint-disable-next-line no-console
   console.warn(
     '[Supabase] VITE_SUPABASE_FUNCTIONS_URL parece ser de otro proyecto que VITE_SUPABASE_URL. ' +
-      `Refs: functions="${refFn}" vs api="${refBase}". Eso provoca 401 Invalid JWT en Edge Functions. ` +
-      'Quita VITE_SUPABASE_FUNCTIONS_URL o usa la URL de funciones del mismo proyecto (Settings → API).'
+      `Refs: functions="${refFn}" vs api="${refBase}". ` +
+      'Elimina VITE_SUPABASE_FUNCTIONS_URL y usa solo VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY.'
   );
 }

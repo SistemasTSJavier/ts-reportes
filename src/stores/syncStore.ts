@@ -51,9 +51,9 @@ function isLikelyJwtUnauthorizedMessage(message: string): boolean {
 }
 
 /**
- * Invoca `generate-ctpat-pdf` con `apikey` + JWT de usuario (requerido por la puerta de enlace de Supabase).
- * - Si existe `VITE_SUPABASE_FUNCTIONS_URL`, usa fetch a esa base (p. ej. `*.functions.supabase.co`).
- * - Si no, usa `supabase.functions.invoke` (URL estándar `.../functions/v1`).
+ * Invoca `generate-ctpat-pdf` vía `supabase.functions.invoke` (misma base que `VITE_SUPABASE_URL` → `.../functions/v1`).
+ * No uses `VITE_SUPABASE_FUNCTIONS_URL` con `*.functions.supabase.co`: a menudo provoca 401 aunque el JWT sea válido
+ * para `*.supabase.co`.
  *
  * Reintenta una vez tras `refreshSessionForApi({ force: true })` (mismo mutex que el resto de la app).
  */
@@ -63,54 +63,17 @@ async function invokeGenerateCtpatPdf(
   supabaseAccessToken: string
 ): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
-  const customFnBase = (import.meta.env.VITE_SUPABASE_FUNCTIONS_URL as string | undefined)
-    ?.trim()
-    .replace(/\/$/, '');
 
   if (!supabaseAccessToken) {
     throw new Error('No hay sesión para generar el PDF.');
   }
 
-  const jsonBody = JSON.stringify({ registroId, accessToken: googleDriveAccessToken });
-
   const runOnce = async (userJwt: string): Promise<void> => {
-    if (customFnBase && anonKey) {
-      const res = await fetch(`${customFnBase}/generate-ctpat-pdf`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${userJwt}`,
-          apikey: anonKey
-        },
-        body: jsonBody
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        let detail = text;
-        try {
-          const j = JSON.parse(text) as { message?: string; code?: number };
-          if (j?.message) detail = j.message;
-        } catch {
-          /* keep text */
-        }
-        throw new Error(detail || `Error Edge Function (${res.status})`);
-      }
-      if (text) {
-        let j: { ok?: boolean; error?: string };
-        try {
-          j = JSON.parse(text) as { ok?: boolean; error?: string };
-        } catch {
-          return;
-        }
-        if (j.ok === false) throw new Error(j.error ?? 'Error en función');
-      }
-      return;
-    }
-
     const { data, error } = await supabase.functions.invoke('generate-ctpat-pdf', {
       body: { registroId, accessToken: googleDriveAccessToken },
       headers: {
-        Authorization: `Bearer ${userJwt}`
+        Authorization: `Bearer ${userJwt}`,
+        ...(anonKey ? { apikey: anonKey } : {})
       }
     });
 
