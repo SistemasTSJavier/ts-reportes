@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
+import { useAuthStore } from '../stores/authStore';
 import HomeView from '../views/HomeView.vue';
 import RegistroView from '../views/RegistroView.vue';
 import PrivacyView from '../views/PrivacyView.vue';
@@ -42,6 +43,26 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes
+});
+
+/** Rutas que usan API/Supabase: renovar JWT antes de entrar (reduce 401 tras inactividad). */
+const ROUTES_NEED_SESSION_REFRESH = new Set(['home', 'registro-new', 'registro-edit']);
+
+router.beforeEach(async (to, _from, next) => {
+  const name = to.name;
+  if (typeof name === 'string' && ROUTES_NEED_SESSION_REFRESH.has(name)) {
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const auth = useAuthStore();
+        if (auth.isSignedIn) {
+          await auth.refreshSessionForApi({ force: false });
+        }
+      } catch {
+        /* seguir navegando; el guard de pantalla mostrará error si hace falta */
+      }
+    }
+  }
+  next();
 });
 
 export default router;

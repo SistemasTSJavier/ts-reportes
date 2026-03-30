@@ -12,7 +12,10 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: true
+    detectSessionInUrl: true,
+    /** PKCE mejora OAuth en navegador y reduce problemas de sesión respecto al flujo implicit. */
+    flowType: 'pkce',
+    storage: typeof window !== 'undefined' ? window.localStorage : undefined
   }
 });
 

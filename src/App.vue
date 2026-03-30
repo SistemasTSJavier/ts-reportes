@@ -68,7 +68,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue';
+import { onBeforeUnmount, onMounted, watch } from 'vue';
 import { useAuthStore } from './stores/authStore';
 import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
@@ -80,10 +80,54 @@ const sync = useSyncStore();
 const pwa = usePwaStore();
 
 let authSubscription: { unsubscribe: () => void } | null = null;
+/** Renueva JWT antes de que caduque si el usuario deja la pestaña abierta (cola vacía no llama a processQueue). */
+let sessionKeepAliveId: ReturnType<typeof setInterval> | null = null;
+const SESSION_KEEPALIVE_MS = 3 * 60 * 1000;
+
+function clearSessionKeepAlive() {
+  if (sessionKeepAliveId != null) {
+    clearInterval(sessionKeepAliveId);
+    sessionKeepAliveId = null;
+  }
+}
+
+function scheduleSessionKeepAlive() {
+  clearSessionKeepAlive();
+  sessionKeepAliveId = setInterval(() => {
+    if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    if (!auth.isSignedIn) return;
+    void auth.refreshSessionForApi({ force: false });
+  }, SESSION_KEEPALIVE_MS);
+}
+
+function refreshSessionIfVisible() {
+  if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+  if (!auth.isSignedIn) return;
+  void auth.refreshSessionForApi({ force: false });
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') refreshSessionIfVisible();
+}
 
 onMounted(() => {
   pwa.init();
   void auth.initSession();
+
+  watch(
+    () => auth.isSignedIn,
+    (signedIn) => {
+      if (signedIn) {
+        scheduleSessionKeepAlive();
+      } else {
+        clearSessionKeepAlive();
+      }
+    },
+    { immediate: true }
+  );
+
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  window.addEventListener('focus', refreshSessionIfVisible);
 
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
     if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && session?.user) {
@@ -110,5 +154,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   authSubscription?.unsubscribe();
+  clearSessionKeepAlive();
+  document.removeEventListener('visibilitychange', onVisibilityChange);
+  window.removeEventListener('focus', refreshSessionIfVisible);
 });
 </script>

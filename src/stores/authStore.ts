@@ -44,8 +44,11 @@ function accessTokenExp(accessToken: string | undefined): number | null {
   }
 }
 
+/** Margen antes del vencimiento del JWT para renovar (evita 401 en llamadas largas o pestaña inactiva). */
+export const JWT_REFRESH_SKEW_SEC = 300;
+
 /** Si falta `exp` o caduca en menos de `skewSec`, hay que refrescar. */
-function shouldRefreshAccessToken(accessToken: string | undefined, skewSec = 120): boolean {
+function shouldRefreshAccessToken(accessToken: string | undefined, skewSec = JWT_REFRESH_SKEW_SEC): boolean {
   const exp = accessTokenExp(accessToken);
   if (exp == null) return true;
   const now = Math.floor(Date.now() / 1000);
@@ -103,7 +106,7 @@ export const useAuthStore = defineStore('auth', {
         if (!s0?.user) return null;
 
         const needsRefresh =
-          force || !s0.access_token || shouldRefreshAccessToken(s0.access_token, 120);
+          force || !s0.access_token || shouldRefreshAccessToken(s0.access_token, JWT_REFRESH_SKEW_SEC);
 
         let session: Session | null = s0;
 

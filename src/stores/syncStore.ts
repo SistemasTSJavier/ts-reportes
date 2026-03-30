@@ -568,11 +568,19 @@ export const useSyncStore = defineStore('sync', {
       window.addEventListener('online', () => {
         void this.updateConnectivity();
         this.retryAttempt = 0;
+        const auth = useAuthStore();
+        if (auth.isSignedIn) {
+          void auth.refreshSessionForApi({ force: false });
+        }
         void this.processQueue();
       });
     },
     attachLifecycleListeners() {
       const trigger = () => {
+        const auth = useAuthStore();
+        if (auth.isSignedIn) {
+          void auth.refreshSessionForApi({ force: false });
+        }
         void this.processQueue();
       };
       document.addEventListener('visibilitychange', () => {
