@@ -661,10 +661,6 @@ async function buildPdf(
     return 'caterpillar.png';
   })();
   let logoCenter = await loadImage(serviceLogoFile);
-  if (!logoCenter && serviceLogoFile !== 'caterpillar.png') {
-    console.warn('[generate-ctpat-pdf] logo no encontrado, fallback:', serviceLogoFile);
-    logoCenter = await loadImage('caterpillar.png');
-  }
 
   const logoRight = await loadImage('oea.jpeg'); // siempre lado derecho
   const logoWatermark = await loadImage('logo.png'); // fondo de cada página
