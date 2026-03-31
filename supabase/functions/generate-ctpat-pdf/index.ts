@@ -648,19 +648,54 @@ async function buildPdf(
   const logoLeft = await loadImage('ctpat.png'); // siempre lado izquierdo
 
   // Logo de la empresa en el centro:
-  // 1) si existe `logoCenterFile` (por usuario/servicio) lo usamos
-  // 2) si no, caemos al fallback basado en `service_id` del registro
-  const serviceLogoFile = (() => {
+  // 1) si existe `logoCenterFile` (por usuario/servicio) probamos exacto y normalizado
+  // 2) si no, derivamos uno por service_id.
+  const serviceLogoCandidates = (() => {
+    const out: string[] = [];
+    const add = (v: string | null | undefined) => {
+      const t = (v ?? '').toString().trim();
+      if (!t) return;
+      if (!out.includes(t)) out.push(t);
+    };
+
     const direct = (logoCenterFile ?? '').toString().trim();
-    if (direct) return normalizeServiceLogoFile(direct);
+    if (direct) {
+      add(direct);
+      add(normalizeServiceLogoFile(direct));
+      return out;
+    }
+
     const s = (registro.service_id ?? '').toString().toLowerCase();
-    if (s.includes('caterpillar')) return 'caterpillar.png';
-    if (s.includes('komatsu')) return 'komatsu.png';
-    if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
-    if (s.includes('danfoss')) return 'danfoss.png';
-    return 'caterpillar.png';
+    if (s.includes('caterpillar')) add('caterpillar.png');
+    else if (s.includes('komatsu')) add('komatsu.png');
+    else if (s.includes('john_deere') || s.includes('john')) add('john_deere.png');
+    else if (s.includes('danfoss')) add('danfoss.png');
+    else add('caterpillar.png');
+    return out;
   })();
-  let logoCenter = await loadImage(serviceLogoFile);
+
+  let logoCenter: PDFImage | null = null;
+  let resolvedCenterLogo = '';
+  for (const candidate of serviceLogoCandidates) {
+    const img = await loadImage(candidate);
+    if (img) {
+      logoCenter = img;
+      resolvedCenterLogo = candidate;
+      break;
+    }
+  }
+  if (!logoCenter) {
+    console.warn('[generate-ctpat-pdf] logo de servicio no cargado', {
+      candidates: serviceLogoCandidates,
+      logoBucket: LOGO_BUCKET,
+      logoBaseUrl
+    });
+  } else if (resolvedCenterLogo !== serviceLogoCandidates[0]) {
+    console.warn('[generate-ctpat-pdf] logo resuelto con variante', {
+      requested: serviceLogoCandidates[0],
+      resolved: resolvedCenterLogo
+    });
+  }
 
   const logoRight = await loadImage('oea.jpeg'); // siempre lado derecho
   const logoWatermark = await loadImage('logo.png'); // fondo de cada página
