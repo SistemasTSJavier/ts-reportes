@@ -69,6 +69,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/authStore';
 import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
@@ -78,6 +79,7 @@ import { supabase } from './supabaseClient';
 const auth = useAuthStore();
 const sync = useSyncStore();
 const pwa = usePwaStore();
+const router = useRouter();
 
 let authSubscription: { unsubscribe: () => void } | null = null;
 /** Renueva JWT antes de que caduque si el usuario deja la pestaña abierta (cola vacía no llama a processQueue). */
@@ -110,9 +112,25 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible') refreshSessionIfVisible();
 }
 
+async function enforceTemplateSetupRoute() {
+  if (!auth.isSignedIn) return;
+  if (!auth.templateChecked) {
+    await auth.ensureTemplateStatus();
+  }
+  if (!auth.templateReady) {
+    const current = router.currentRoute.value.name;
+    if (current !== 'template-setup') {
+      await router.push({ name: 'template-setup' });
+    }
+  }
+}
+
 onMounted(() => {
   pwa.init();
-  void auth.initSession();
+  void (async () => {
+    await auth.initSession();
+    await enforceTemplateSetupRoute();
+  })();
 
   watch(
     () => auth.isSignedIn,
@@ -137,6 +155,7 @@ onMounted(() => {
         auth.googleAccessToken = pt;
         auth.rememberGoogleProviderToken(session.user.id, pt);
       }
+      void enforceTemplateSetupRoute();
     }
   });
   authSubscription = data.subscription;

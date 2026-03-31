@@ -56,6 +56,36 @@ alter table public.user_drive_config
     using (auth.uid() = user_id)
     with check (auth.uid() = user_id);
 
+  -- Plantilla PDF por usuario (canvas/layout fijo)
+  create table if not exists public.user_pdf_template (
+    user_id uuid primary key references auth.users(id) on delete cascade,
+    template_json jsonb not null default '{}'::jsonb,
+    is_active boolean not null default true,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  );
+
+  alter table public.user_pdf_template enable row level security;
+
+  drop policy if exists "Usuarios ven su plantilla PDF" on public.user_pdf_template;
+  create policy "Usuarios ven su plantilla PDF"
+    on public.user_pdf_template
+    for select
+    using (auth.uid() = user_id);
+
+  drop policy if exists "Usuarios insertan su plantilla PDF" on public.user_pdf_template;
+  create policy "Usuarios insertan su plantilla PDF"
+    on public.user_pdf_template
+    for insert
+    with check (auth.uid() = user_id);
+
+  drop policy if exists "Usuarios actualizan su plantilla PDF" on public.user_pdf_template;
+  create policy "Usuarios actualizan su plantilla PDF"
+    on public.user_pdf_template
+    for update
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
   -- Contador de folio automático POR USUARIO (TS-1, TS-2, ...)
   create table if not exists public.registros_ctpat_folio_counter (
     user_id uuid primary key references auth.users(id) on delete cascade,

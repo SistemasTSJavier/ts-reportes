@@ -16,6 +16,16 @@ interface AuthState {
   driveConfigRetryScheduled: boolean;
   /** Nombre de archivo del logo de servicio (p. ej. danfoss.png), desde user_drive_config */
   serviceLogoFile: string | null;
+  /** Plantilla PDF (canvas) obligatoria por usuario */
+  templateReady: boolean;
+  templateChecked: boolean;
+}
+
+export interface UserPdfTemplateRow {
+  user_id: string;
+  template_json: Record<string, unknown>;
+  is_active: boolean;
+  updated_at?: string | null;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
@@ -78,7 +88,9 @@ export const useAuthStore = defineStore('auth', {
     googleAccessToken: null,
     driveConfigReady: false,
     driveConfigRetryScheduled: false,
-    serviceLogoFile: null
+    serviceLogoFile: null,
+    templateReady: false,
+    templateChecked: false
   }),
   actions: {
     /**
@@ -227,6 +239,46 @@ export const useAuthStore = defineStore('auth', {
       if (error) throw error;
       return data;
     },
+    async getActiveTemplateRow(userId: string): Promise<UserPdfTemplateRow | null> {
+      const { data, error } = await supabase
+        .from('user_pdf_template')
+        .select('user_id, template_json, is_active, updated_at')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .maybeSingle<UserPdfTemplateRow>();
+      if (error) throw error;
+      return data ?? null;
+    },
+    async ensureTemplateStatus() {
+      if (!this.userId) {
+        this.templateReady = false;
+        this.templateChecked = true;
+        return;
+      }
+      try {
+        const row = await this.getActiveTemplateRow(this.userId);
+        this.templateReady = !!row;
+      } catch (e) {
+        console.error('Error consultando user_pdf_template:', e);
+        this.templateReady = false;
+      } finally {
+        this.templateChecked = true;
+      }
+    },
+    async saveUserTemplate(templateJson: Record<string, unknown>) {
+      if (!this.userId) throw new Error('No hay usuario autenticado.');
+      const { error } = await supabase.from('user_pdf_template').upsert(
+        {
+          user_id: this.userId,
+          template_json: templateJson,
+          is_active: true
+        },
+        { onConflict: 'user_id' }
+      );
+      if (error) throw error;
+      this.templateReady = true;
+      this.templateChecked = true;
+    },
     scheduleDriveConfigRetry() {
       if (this.driveConfigRetryScheduled) return;
       this.driveConfigRetryScheduled = true;
@@ -318,6 +370,7 @@ export const useAuthStore = defineStore('auth', {
           this.googleAccessToken = typeof token === 'string' && token.length > 0 ? token : null;
           if (fromSession && uid) this.rememberGoogleProviderToken(uid, fromSession);
           await this.ensureDriveConfigIfNeeded();
+          await this.ensureTemplateStatus();
           if (!this.serviceLogoFile && session.user) {
             const meta = (session.user.user_metadata ?? {}) as Record<string, unknown>;
             const candidate =
@@ -337,6 +390,8 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.googleAccessToken = null;
           this.serviceLogoFile = null;
+          this.templateReady = false;
+          this.templateChecked = true;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           this.clearGoogleProviderTokenCache();
         }
@@ -352,11 +407,15 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.googleAccessToken = null;
           this.serviceLogoFile = null;
+          this.templateReady = false;
+          this.templateChecked = true;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           this.clearGoogleProviderTokenCache();
         } else {
           this.isSignedIn = !!this.userId;
           this.googleAccessToken = null;
+          this.templateReady = false;
+          this.templateChecked = false;
           if (this.userId) {
             this.scheduleDriveConfigRetry();
           }
@@ -457,6 +516,8 @@ export const useAuthStore = defineStore('auth', {
       this.displayName = null;
       this.googleAccessToken = null;
       this.serviceLogoFile = null;
+      this.templateReady = false;
+      this.templateChecked = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       this.clearGoogleProviderTokenCache();
     },

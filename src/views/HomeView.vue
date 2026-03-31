@@ -8,13 +8,24 @@
         <p class="text-sm text-slate-500 mt-0.5">
           Gestiona tus reportes de entrada y salida de transporte.
         </p>
+        <p class="text-xs mt-1" :class="authStore.templateReady ? 'text-emerald-700' : 'text-orange-700'">
+          {{ authStore.templateReady ? 'Plantilla PDF: configurada' : 'Plantilla PDF: pendiente de configurar' }}
+        </p>
       </div>
-      <button
-        class="btn-primary w-full sm:w-auto shrink-0"
-        @click="goNew"
-      >
-        Nuevo registro
-      </button>
+      <div class="flex w-full sm:w-auto gap-2">
+        <button
+          class="btn-secondary w-full sm:w-auto shrink-0"
+          @click="openTemplateSetup"
+        >
+          Configurar plantilla
+        </button>
+        <button
+          class="btn-primary w-full sm:w-auto shrink-0"
+          @click="goNew"
+        >
+          Nuevo registro
+        </button>
+      </div>
     </section>
 
     <section class="card p-4 sm:p-5">
@@ -41,6 +52,22 @@
           @click="retrySyncErrors"
         >
           Reintentar ({{ erroredSyncCount }})
+        </button>
+        <button
+          v-if="needsGoogleReconnect"
+          type="button"
+          class="text-xs text-amber-700 font-semibold hover:underline"
+          @click="reconnectGoogle"
+        >
+          Reconectar Google
+        </button>
+        <button
+          v-if="needsTemplateSetup"
+          type="button"
+          class="text-xs text-orange-700 font-semibold hover:underline"
+          @click="openTemplateSetup"
+        >
+          Configurar plantilla
         </button>
         <button
           v-if="erroredSyncCount > 0"
@@ -149,7 +176,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
-import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
+import { isGoogleDriveAccessError, isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
@@ -198,6 +225,11 @@ const syncErrorMessage = computed(() => {
   )[0];
   return latest?.lastError ?? '';
 });
+const needsGoogleReconnect = computed(() => isGoogleDriveAccessError(syncErrorMessage.value));
+const needsTemplateSetup = computed(() =>
+  syncErrorMessage.value.toLowerCase().includes('template requerida') ||
+  syncErrorMessage.value.toLowerCase().includes('plantilla pdf')
+);
 const syncStatusText = computed(() => {
   if (syncStore.connectivity === 'offline') return 'Sin conexión';
   if (syncStore.syncing) return 'Sincronizando…';
@@ -294,12 +326,30 @@ watch(
   }
 );
 
+watch(
+  () => needsTemplateSetup.value,
+  (required) => {
+    if (!required) return;
+    if (router.currentRoute.value.name === 'template-setup') return;
+    void router.push({ name: 'template-setup' });
+  },
+  { immediate: true }
+);
+
 function goNew() {
   router.push({ name: 'registro-new' });
 }
 
 function retrySyncErrors() {
   void syncStore.retryErroredItems();
+}
+
+function reconnectGoogle() {
+  void authStore.signInWithGoogle();
+}
+
+function openTemplateSetup() {
+  void router.push({ name: 'template-setup' });
 }
 
 async function clearSyncErrors() {
@@ -322,3 +372,4 @@ async function installPwa() {
   }
 }
 </script>
+

@@ -41,6 +41,11 @@ interface UserDriveConfigRow {
   service_logo_file: string | null;
 }
 
+interface UserPdfTemplateRow {
+  template_json: Record<string, unknown> | null;
+  is_active: boolean;
+}
+
 /** Alineado con la PWA (authStore): metadata → nombre de archivo en Storage */
 function normalizeServiceLogoFile(v: string | null | undefined): string {
   if (!v) return 'caterpillar.png';
@@ -531,7 +536,8 @@ type SupabaseForStorage = {
 async function buildPdf(
   registro: RegistroRow,
   logoCenterFile?: string | null,
-  supabaseStorage?: SupabaseForStorage
+  supabaseStorage?: SupabaseForStorage,
+  templateJson?: Record<string, unknown> | null
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
 
@@ -752,13 +758,22 @@ async function buildPdf(
   });
 
   // 1) Logos arriba (misma disposición: izquierda, centro, derecha)
-  const logoWidth = 62;
-  const logoHeight = 36;
+  const templateLogoBox =
+    templateJson && typeof templateJson === 'object'
+      ? ((templateJson.logoBox as Record<string, unknown> | undefined) ?? undefined)
+      : undefined;
+  const numOr = (v: unknown, fallback: number) => {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const logoWidth = Math.max(28, numOr(templateLogoBox?.width, 62));
+  const logoHeight = Math.max(18, numOr(templateLogoBox?.height, 36));
   const logosGapFromTop = 12;
-  const logosY = cursorY - logosGapFromTop - logoHeight / 2;
+  const defaultY = cursorY - logosGapFromTop - logoHeight / 2;
+  const logosY = numOr(templateLogoBox?.y, defaultY) + logoHeight / 2;
   const leftX = 32 + 10;
   const rightX = width - 32 - 10 - logoWidth;
-  const centerX = width / 2 - logoWidth / 2;
+  const centerX = numOr(templateLogoBox?.x, width / 2 - logoWidth / 2);
 
   /** Dibuja el logo contenido dentro de una caja fija, centrado y sin deformar proporción. */
   function drawLogoContained(
@@ -2306,6 +2321,20 @@ Deno.serve(async (req) => {
 
     const { data: authUserRow } = await supabaseServer.auth.admin.getUserById(data.user_id);
     const userMeta = authUserRow?.user?.user_metadata as Record<string, unknown> | undefined;
+    const { data: userTemplate } = await supabaseServer
+      .from('user_pdf_template')
+      .select('template_json, is_active')
+      .eq('user_id', data.user_id)
+      .eq('is_active', true)
+      .maybeSingle<UserPdfTemplateRow>();
+
+    if (!userTemplate?.template_json) {
+      return jsonError(
+        origin,
+        409,
+        'Template requerida: primero configura tu plantilla PDF en la app antes de sincronizar.'
+      );
+    }
 
     const { data: driveCfg, error: driveCfgError } = await supabaseServer
       .from('user_drive_config')
@@ -2349,7 +2378,7 @@ Deno.serve(async (req) => {
       return m ? normalizeServiceLogoFile(m) : null;
     })();
 
-    const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer);
+    const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer, userTemplate.template_json);
 
     const rawFolioFile = (data.folio_pdf ?? '').toString().trim();
     const mFile = rawFolioFile.match(/^TS-0*(\d+)$/i);

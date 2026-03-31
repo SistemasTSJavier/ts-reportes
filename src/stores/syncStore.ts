@@ -521,7 +521,10 @@ export const useSyncStore = defineStore('sync', {
               hadSuccess = true;
             }
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            const rawMessage = err instanceof Error ? err.message : String(err);
+            const message = isGoogleDriveAccessError(rawMessage)
+              ? 'Google Drive requiere reconexión. Pulsa «Reconectar Google» y luego «Reintentar».'
+              : rawMessage;
             if (shouldInvalidateLocalSession(message)) {
               await this.handleSessionInvalidated();
               return { hadError: true, lastError: SESSION_EXPIRED_SHORT, skipped: false };
@@ -572,6 +575,11 @@ export const useSyncStore = defineStore('sync', {
       let touched = false;
       for (const item of this.queue) {
         if (item.status === 'error') {
+          const msg = (item.lastError ?? '').toLowerCase();
+          // Errores funcionales (requiere acción del usuario) no se reintentan automáticamente.
+          if (msg.includes('template requerida') || msg.includes('plantilla pdf')) {
+            continue;
+          }
           item.status = 'pending';
           item.lastError = undefined;
           item.updatedAt = new Date().toISOString();
