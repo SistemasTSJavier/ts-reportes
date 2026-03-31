@@ -50,7 +50,8 @@ function normalizeServiceLogoFile(v: string | null | undefined): string {
   if (s.includes('komatsu')) return 'komatsu.png';
   if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
   if (s.includes('danfoss')) return 'danfoss.png';
-  return 'caterpillar.png';
+  // Logo libre: si viene sin extensión, lo tratamos como PNG.
+  return `${s}.png`;
 }
 
 function logoFromUserMetadata(meta: Record<string, unknown> | undefined): string | null {
@@ -648,8 +649,8 @@ async function buildPdf(
   const logoLeft = await loadImage('ctpat.png'); // siempre lado izquierdo
 
   // Logo de la empresa en el centro:
-  // 1) si existe `logoCenterFile` (por usuario/servicio) probamos exacto y normalizado
-  // 2) si no, derivamos uno por service_id.
+  // Si existe `logoCenterFile` (por usuario/servicio) probamos exacto y normalizado.
+  // Si no existe, NO forzamos caterpillar: dejamos espacio vacío.
   const serviceLogoCandidates = (() => {
     const out: string[] = [];
     const add = (v: string | null | undefined) => {
@@ -664,13 +665,6 @@ async function buildPdf(
       add(normalizeServiceLogoFile(direct));
       return out;
     }
-
-    const s = (registro.service_id ?? '').toString().toLowerCase();
-    if (s.includes('caterpillar')) add('caterpillar.png');
-    else if (s.includes('komatsu')) add('komatsu.png');
-    else if (s.includes('john_deere') || s.includes('john')) add('john_deere.png');
-    else if (s.includes('danfoss')) add('danfoss.png');
-    else add('caterpillar.png');
     return out;
   })();
 

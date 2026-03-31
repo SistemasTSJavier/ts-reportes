@@ -64,7 +64,8 @@ export function normalizeServiceLogoFile(v: string | null): string {
   if (s.includes('komatsu')) return 'komatsu.png';
   if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
   if (s.includes('danfoss')) return 'danfoss.png';
-  return 'caterpillar.png';
+  // Permite logos arbitrarios: si no trae extensión, asumimos PNG.
+  return `${s}.png`;
 }
 
 export const useAuthStore = defineStore('auth', {
