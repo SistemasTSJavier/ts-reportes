@@ -8,17 +8,8 @@
         <p class="text-sm text-slate-500 mt-0.5">
           Gestiona tus reportes de entrada y salida de transporte.
         </p>
-        <p class="text-xs mt-1" :class="authStore.templateReady ? 'text-emerald-700' : 'text-orange-700'">
-          {{ authStore.templateReady ? 'Plantilla PDF: configurada' : 'Plantilla PDF: pendiente de configurar' }}
-        </p>
       </div>
-      <div class="flex w-full sm:w-auto gap-2">
-        <button
-          class="btn-secondary w-full sm:w-auto shrink-0"
-          @click="openTemplateSetup"
-        >
-          Configurar plantilla
-        </button>
+      <div class="grid w-full sm:w-auto grid-cols-1 sm:grid-cols-2 gap-2">
         <button
           class="btn-primary w-full sm:w-auto shrink-0"
           @click="goNew"
@@ -29,78 +20,78 @@
     </section>
 
     <section class="card p-4 sm:p-5">
-      <div class="flex flex-wrap items-center gap-3">
-        <span class="text-sm font-medium text-slate-700">Filtrar por movimiento</span>
-        <span
-          class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold"
-          :class="syncStatusClass"
-        >
-          {{ syncStatusText }}
-        </span>
-        <button
-          v-if="pwa.isInstallable && !pwa.isStandalone"
-          type="button"
-          class="text-xs text-emerald-700 font-semibold hover:underline"
-          @click="installPwa"
-        >
-          Instalar app en Android
-        </button>
-        <button
-          v-if="erroredSyncCount > 0"
-          type="button"
-          class="text-xs text-tactical-blue font-semibold hover:underline"
-          @click="retrySyncErrors"
-        >
-          Reintentar ({{ erroredSyncCount }})
-        </button>
-        <button
-          v-if="needsGoogleReconnect"
-          type="button"
-          class="text-xs text-amber-700 font-semibold hover:underline"
-          @click="reconnectGoogle"
-        >
-          Reconectar Google
-        </button>
-        <button
-          v-if="needsTemplateSetup"
-          type="button"
-          class="text-xs text-orange-700 font-semibold hover:underline"
-          @click="openTemplateSetup"
-        >
-          Configurar plantilla
-        </button>
-        <button
-          v-if="erroredSyncCount > 0"
-          type="button"
-          class="text-xs text-rose-700 font-semibold hover:underline"
-          @click="clearSyncErrors"
-        >
-          Limpiar errores
-        </button>
-        <button
-          v-if="syncQueueItems.length > 0 || pendingSyncCount > 0"
-          type="button"
-          class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
-          :disabled="syncStore.syncing || syncStore.connectivity === 'offline'"
-          @click="syncNow"
-        >
-          {{ syncStore.syncing ? 'Sincronizando…' : 'Sincronizar ahora' }}
-        </button>
-        <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
-          <button
-            v-for="opt in movementOptions"
-            :key="opt.value"
-            type="button"
-            class="px-4 py-2 text-sm font-medium rounded-md transition-colors"
-            :class="
-              movementFilter === opt.value
-                ? 'bg-tactical-blue text-white shadow-sm'
-                : 'text-slate-600 hover:text-slate-800 hover:bg-white'
-            "
-            @click="movementFilter = opt.value"
+      <div class="space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+          <span class="text-sm font-medium text-slate-700">Filtrar por movimiento</span>
+          <span
+            class="inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-semibold"
+            :class="syncStatusClass"
           >
-            {{ opt.label }}
+            {{ syncStatusText }}
+          </span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <button
+            v-if="pwa.isInstallable && !pwa.isStandalone"
+            type="button"
+            class="text-xs text-emerald-700 font-semibold hover:underline"
+            @click="installPwa"
+          >
+            Instalar app en Android
           </button>
+          <button
+            v-if="erroredSyncCount > 0"
+            type="button"
+            class="text-xs text-tactical-blue font-semibold hover:underline"
+            @click="retrySyncErrors"
+          >
+            Reintentar ({{ erroredSyncCount }})
+          </button>
+          <button
+            v-if="needsGoogleReconnect"
+            type="button"
+            class="text-xs text-amber-700 font-semibold hover:underline"
+            @click="reconnectGoogle"
+          >
+            Reconectar Google
+          </button>
+          <button
+            v-if="erroredSyncCount > 0"
+            type="button"
+            class="text-xs text-rose-700 font-semibold hover:underline"
+            @click="clearSyncErrors"
+          >
+            Limpiar errores
+          </button>
+          <button
+            v-if="syncQueueItems.length > 0 || pendingSyncCount > 0"
+            type="button"
+            class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
+            :disabled="syncStore.syncing || syncStore.connectivity === 'offline'"
+            @click="syncNow"
+          >
+            {{ syncStore.syncing ? 'Sincronizando…' : 'Sincronizar ahora' }}
+          </button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <div class="inline-flex min-w-full sm:min-w-0 rounded-lg border border-slate-200 bg-slate-50/50 p-0.5">
+            <button
+              v-for="opt in movementOptions"
+              :key="opt.value"
+              type="button"
+              class="flex-1 px-4 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap"
+              :class="
+                movementFilter === opt.value
+                  ? 'bg-tactical-blue text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-800 hover:bg-white'
+              "
+              @click="movementFilter = opt.value"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
         </div>
       </div>
       <p
@@ -226,10 +217,6 @@ const syncErrorMessage = computed(() => {
   return latest?.lastError ?? '';
 });
 const needsGoogleReconnect = computed(() => isGoogleDriveAccessError(syncErrorMessage.value));
-const needsTemplateSetup = computed(() =>
-  syncErrorMessage.value.toLowerCase().includes('template requerida') ||
-  syncErrorMessage.value.toLowerCase().includes('plantilla pdf')
-);
 const syncStatusText = computed(() => {
   if (syncStore.connectivity === 'offline') return 'Sin conexión';
   if (syncStore.syncing) return 'Sincronizando…';
@@ -326,15 +313,6 @@ watch(
   }
 );
 
-watch(
-  () => needsTemplateSetup.value,
-  (required) => {
-    if (!required) return;
-    if (router.currentRoute.value.name === 'template-setup') return;
-    void router.push({ name: 'template-setup' });
-  },
-  { immediate: true }
-);
 
 function goNew() {
   router.push({ name: 'registro-new' });
@@ -346,10 +324,6 @@ function retrySyncErrors() {
 
 function reconnectGoogle() {
   void authStore.signInWithGoogle();
-}
-
-function openTemplateSetup() {
-  void router.push({ name: 'template-setup' });
 }
 
 async function clearSyncErrors() {
