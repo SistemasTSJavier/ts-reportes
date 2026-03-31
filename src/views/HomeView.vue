@@ -43,6 +43,14 @@
           Reintentar ({{ erroredSyncCount }})
         </button>
         <button
+          v-if="erroredSyncCount > 0"
+          type="button"
+          class="text-xs text-rose-700 font-semibold hover:underline"
+          @click="clearSyncErrors"
+        >
+          Limpiar errores
+        </button>
+        <button
           v-if="syncQueueItems.length > 0 || pendingSyncCount > 0"
           type="button"
           class="text-xs text-indigo-700 font-semibold hover:underline disabled:opacity-60"
@@ -292,6 +300,11 @@ function goNew() {
 
 function retrySyncErrors() {
   void syncStore.retryErroredItems();
+}
+
+async function clearSyncErrors() {
+  await syncStore.clearErroredItems();
+  toastStore.info('Errores limpiados', 'Se eliminaron los elementos con error de la cola.');
 }
 
 function syncNow() {

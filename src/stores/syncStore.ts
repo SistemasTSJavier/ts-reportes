@@ -561,6 +561,27 @@ export const useSyncStore = defineStore('sync', {
       await this.persist();
       return this.processQueue();
     },
+    async clearErroredItems() {
+      const before = this.queue.length;
+      this.queue = this.queue.filter((item) => item.status !== 'error');
+      if (this.queue.length !== before) {
+        await this.persist();
+      }
+    },
+    async markErroredItemsAsPending() {
+      let touched = false;
+      for (const item of this.queue) {
+        if (item.status === 'error') {
+          item.status = 'pending';
+          item.lastError = undefined;
+          item.updatedAt = new Date().toISOString();
+          touched = true;
+        }
+      }
+      if (touched) {
+        await this.persist();
+      }
+    },
     attachOnlineListener() {
       window.addEventListener('offline', () => {
         this.connectivity = 'offline';
@@ -568,6 +589,7 @@ export const useSyncStore = defineStore('sync', {
       window.addEventListener('online', () => {
         void this.updateConnectivity();
         this.retryAttempt = 0;
+        void this.markErroredItemsAsPending();
         const auth = useAuthStore();
         if (auth.isSignedIn) {
           void auth.refreshSessionForApi({ force: false });
