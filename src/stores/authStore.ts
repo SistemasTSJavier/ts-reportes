@@ -4,6 +4,7 @@ import { supabase } from '../supabaseClient';
 import { ensureDriveFolders } from '../services/driveService';
 import { SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
 import { useToastStore } from './toastStore';
+const LOGO_BUCKET = ((import.meta.env.VITE_LOGO_BUCKET as string | undefined)?.trim() || 'ctpat-logs');
 
 interface AuthState {
   isSignedIn: boolean;
@@ -16,16 +17,6 @@ interface AuthState {
   driveConfigRetryScheduled: boolean;
   /** Nombre de archivo del logo de servicio (p. ej. danfoss.png), desde user_drive_config */
   serviceLogoFile: string | null;
-  /** Plantilla PDF (canvas) obligatoria por usuario */
-  templateReady: boolean;
-  templateChecked: boolean;
-}
-
-export interface UserPdfTemplateRow {
-  user_id: string;
-  template_json: Record<string, unknown>;
-  is_active: boolean;
-  updated_at?: string | null;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
@@ -67,7 +58,7 @@ function shouldRefreshAccessToken(accessToken: string | undefined, skewSec = JWT
 
 /** Normaliza metadata/BD al nombre de archivo en public/ y en assets del PDF */
 export function normalizeServiceLogoFile(v: string | null): string {
-  if (!v) return 'caterpillar.png';
+  if (!v) return 'logo.png';
   const s = v.toString().toLowerCase();
   if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return s;
   if (s.includes('caterpillar')) return 'caterpillar.png';
@@ -88,9 +79,7 @@ export const useAuthStore = defineStore('auth', {
     googleAccessToken: null,
     driveConfigReady: false,
     driveConfigRetryScheduled: false,
-    serviceLogoFile: null,
-    templateReady: false,
-    templateChecked: false
+    serviceLogoFile: null
   }),
   actions: {
     /**
@@ -239,45 +228,29 @@ export const useAuthStore = defineStore('auth', {
       if (error) throw error;
       return data;
     },
-    async getActiveTemplateRow(userId: string): Promise<UserPdfTemplateRow | null> {
-      const { data, error } = await supabase
-        .from('user_pdf_template')
-        .select('user_id, template_json, is_active, updated_at')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .maybeSingle<UserPdfTemplateRow>();
-      if (error) throw error;
-      return data ?? null;
-    },
-    async ensureTemplateStatus() {
-      if (!this.userId) {
-        this.templateReady = false;
-        this.templateChecked = true;
-        return;
-      }
-      try {
-        const row = await this.getActiveTemplateRow(this.userId);
-        this.templateReady = !!row;
-      } catch (e) {
-        console.error('Error consultando user_pdf_template:', e);
-        this.templateReady = false;
-      } finally {
-        this.templateChecked = true;
-      }
-    },
-    async saveUserTemplate(templateJson: Record<string, unknown>) {
+    async uploadServiceLogo(file: File): Promise<string> {
       if (!this.userId) throw new Error('No hay usuario autenticado.');
-      const { error } = await supabase.from('user_pdf_template').upsert(
-        {
-          user_id: this.userId,
-          template_json: templateJson,
-          is_active: true
-        },
-        { onConflict: 'user_id' }
-      );
-      if (error) throw error;
-      this.templateReady = true;
-      this.templateChecked = true;
+      const rawName = file.name.toLowerCase();
+      const ext = rawName.endsWith('.jpg') || rawName.endsWith('.jpeg') ? 'jpg' : 'png';
+      const objectPath = `logos/${this.userId}.${ext}`;
+
+      // Asegura que exista user_drive_config antes de actualizar service_logo_file.
+      await this.ensureDriveConfigIfNeeded();
+
+      const { error: upErr } = await supabase.storage.from(LOGO_BUCKET).upload(objectPath, file, {
+        upsert: true,
+        contentType: ext === 'jpg' ? 'image/jpeg' : 'image/png'
+      });
+      if (upErr) throw new Error(`No se pudo subir logo: ${upErr.message}`);
+
+      const { error: cfgErr } = await supabase
+        .from('user_drive_config')
+        .update({ service_logo_file: objectPath })
+        .eq('user_id', this.userId);
+      if (cfgErr) throw new Error(`No se pudo guardar logo en configuración: ${cfgErr.message}`);
+
+      this.serviceLogoFile = objectPath;
+      return objectPath;
     },
     scheduleDriveConfigRetry() {
       if (this.driveConfigRetryScheduled) return;
@@ -370,7 +343,6 @@ export const useAuthStore = defineStore('auth', {
           this.googleAccessToken = typeof token === 'string' && token.length > 0 ? token : null;
           if (fromSession && uid) this.rememberGoogleProviderToken(uid, fromSession);
           await this.ensureDriveConfigIfNeeded();
-          await this.ensureTemplateStatus();
           if (!this.serviceLogoFile && session.user) {
             const meta = (session.user.user_metadata ?? {}) as Record<string, unknown>;
             const candidate =
@@ -390,8 +362,6 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.googleAccessToken = null;
           this.serviceLogoFile = null;
-          this.templateReady = false;
-          this.templateChecked = true;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           this.clearGoogleProviderTokenCache();
         }
@@ -407,15 +377,11 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.googleAccessToken = null;
           this.serviceLogoFile = null;
-          this.templateReady = false;
-          this.templateChecked = true;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           this.clearGoogleProviderTokenCache();
         } else {
           this.isSignedIn = !!this.userId;
           this.googleAccessToken = null;
-          this.templateReady = false;
-          this.templateChecked = false;
           if (this.userId) {
             this.scheduleDriveConfigRetry();
           }
@@ -516,8 +482,6 @@ export const useAuthStore = defineStore('auth', {
       this.displayName = null;
       this.googleAccessToken = null;
       this.serviceLogoFile = null;
-      this.templateReady = false;
-      this.templateChecked = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       this.clearGoogleProviderTokenCache();
     },

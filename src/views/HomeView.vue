@@ -8,8 +8,31 @@
         <p class="text-sm text-slate-500 mt-0.5">
           Gestiona tus reportes de entrada y salida de transporte.
         </p>
+        <div class="mt-2 flex items-center gap-3">
+          <img
+            v-if="serviceLogoPreviewUrl"
+            :src="serviceLogoPreviewUrl"
+            alt="Logo de servicio"
+            class="h-8 w-16 object-contain rounded border border-slate-200 bg-white px-1"
+          />
+          <span v-else class="text-xs text-slate-500">Sin logo configurado (se usará `logo.png`).</span>
+        </div>
       </div>
       <div class="grid w-full sm:w-auto grid-cols-1 sm:grid-cols-2 gap-2">
+        <input
+          ref="logoInputRef"
+          type="file"
+          accept="image/png,image/jpeg,image/jpg"
+          class="hidden"
+          @change="onPickLogo"
+        />
+        <button
+          class="btn-secondary w-full sm:w-auto shrink-0"
+          :disabled="uploadingLogo"
+          @click="triggerLogoPicker"
+        >
+          {{ uploadingLogo ? 'Subiendo logo...' : 'Configurar logo' }}
+        </button>
         <button
           class="btn-primary w-full sm:w-auto shrink-0"
           @click="goNew"
@@ -168,6 +191,7 @@ import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
 import { isGoogleDriveAccessError, isSessionExpiredError } from '../utils/supabaseAuthErrors';
+import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
@@ -187,6 +211,8 @@ const registros = ref<Array<{
   checklist_tracto: Record<string, unknown> | null;
 }>>([]);
 const loadingRegistros = ref(false);
+const uploadingLogo = ref(false);
+const logoInputRef = ref<HTMLInputElement | null>(null);
 
 const movementOptions = [
   { label: 'Todos', value: 'all' },
@@ -230,6 +256,7 @@ const syncStatusClass = computed(() => {
   if (syncStore.syncing || pendingSyncCount.value > 0) return 'bg-blue-100 text-blue-800';
   return 'bg-emerald-100 text-emerald-800';
 });
+const serviceLogoPreviewUrl = computed(() => getServiceLogoPublicUrl(authStore.serviceLogoFile || 'logo.png'));
 
 function formatFolio(folio: string | null | undefined): string {
   if (!folio || typeof folio !== 'string') return '';
@@ -316,6 +343,26 @@ watch(
 
 function goNew() {
   router.push({ name: 'registro-new' });
+}
+
+function triggerLogoPicker() {
+  logoInputRef.value?.click();
+}
+
+async function onPickLogo(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  uploadingLogo.value = true;
+  try {
+    await authStore.uploadServiceLogo(file);
+    toastStore.success('Logo actualizado', 'El logo se guardó para tu servicio.');
+  } catch (e) {
+    toastStore.error('Logo', e instanceof Error ? e.message : 'No se pudo actualizar el logo.');
+  } finally {
+    uploadingLogo.value = false;
+    input.value = '';
+  }
 }
 
 function retrySyncErrors() {

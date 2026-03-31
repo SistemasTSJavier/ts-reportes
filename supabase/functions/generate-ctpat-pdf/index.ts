@@ -2346,7 +2346,7 @@ Deno.serve(async (req) => {
       const d = finalDriveCfg?.service_logo_file?.trim();
       if (d) return d;
       const m = logoFromUserMetadata(userMeta);
-      return m ? normalizeServiceLogoFile(m) : null;
+      return m ? normalizeServiceLogoFile(m) : 'logo.png';
     })();
 
     const pdfBytes = await buildPdf(data, resolvedCenterLogo, supabaseServer);

@@ -10,7 +10,7 @@ const BUCKET = (import.meta.env.VITE_LOGO_BUCKET as string | undefined)?.trim();
 export function getServiceLogoPublicUrl(filename: string | null | undefined): string {
   const name = filename?.trim() ?? '';
   if (!name) return '';
-  if (!/^[a-zA-Z0-9._-]+\.(png|jpe?g)$/i.test(name)) return '';
+  if (!/^[a-zA-Z0-9/_\.-]+\.(png|jpe?g)$/i.test(name)) return '';
   if (BUCKET) {
     const { data } = supabase.storage.from(BUCKET).getPublicUrl(name);
     return data.publicUrl;
