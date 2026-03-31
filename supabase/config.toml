@@ -1,0 +1,4 @@
+# Configuración de Edge Functions (Supabase CLI).
+# La puerta puede devolver 401 aunque el JWT sea válido en algunos casos; la función valida con auth.getUser().
+[functions.generate-ctpat-pdf]
+verify_jwt = false

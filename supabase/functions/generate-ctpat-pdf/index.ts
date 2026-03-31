@@ -45,7 +45,7 @@ interface UserDriveConfigRow {
 function normalizeServiceLogoFile(v: string | null | undefined): string {
   if (!v) return 'caterpillar.png';
   const s = v.toString().toLowerCase();
-  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return v.toString();
+  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return s;
   if (s.includes('caterpillar')) return 'caterpillar.png';
   if (s.includes('komatsu')) return 'komatsu.png';
   if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
@@ -66,42 +66,9 @@ function logoFromUserMetadata(meta: Record<string, unknown> | undefined): string
   return t.length ? t : null;
 }
 
-function decodeJwtSub(authorizationHeader: string | null): string | null {
-  if (!authorizationHeader) return null;
-  const token = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-
-  // base64url -> base64
-  const payloadB64Url = parts[1];
-  const payloadB64 = payloadB64Url.replace(/-/g, '+').replace(/_/g, '/');
-  const padding = '='.repeat((4 - (payloadB64.length % 4)) % 4);
-
-  try {
-    // Decodifica con UTF-8 (evita problemas si el payload trae chars no-ASCII)
-    const bin = atob(payloadB64 + padding);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const jsonStr = new TextDecoder().decode(bytes);
-    const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-
-    const sub =
-      (typeof parsed.sub === 'string' ? parsed.sub : null) ??
-      (typeof parsed.user_id === 'string' ? parsed.user_id : null) ??
-      (typeof parsed.uid === 'string' ? parsed.uid : null);
-
-    return sub;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Resuelve el usuario del header Authorization validando contra Auth (recomendado).
- * Si no hay SUPABASE_ANON_KEY, usa solo decodificación local (menos fiable en edge cases).
+ * Valida el JWT con Auth (GET /user). Obligatorio: con verify_jwt=false en la puerta,
+ * aquí es la única comprobación fiable (no decodificar el payload sin verificar firma).
  */
 async function resolveUserIdFromAuthorization(
   authorizationHeader: string | null
@@ -111,20 +78,23 @@ async function resolveUserIdFromAuthorization(
   const token = raw.startsWith('Bearer ') ? raw.slice('Bearer '.length).trim() : raw;
   if (!token) return null;
 
-  if (SUPABASE_ANON_KEY) {
-    const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false }
-    });
-    const {
-      data: { user },
-      error
-    } = await authClient.auth.getUser(token);
-    if (!error && user?.id) {
-      return user.id;
-    }
+  if (!SUPABASE_ANON_KEY) {
+    console.error('[generate-ctpat-pdf] SUPABASE_ANON_KEY no disponible en el entorno de la función');
+    return null;
   }
 
-  return decodeJwtSub(authorizationHeader);
+  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  const {
+    data: { user },
+    error
+  } = await authClient.auth.getUser(token);
+  if (!error && user?.id) {
+    return user.id;
+  }
+  console.error('[generate-ctpat-pdf] auth.getUser:', error?.message ?? 'sin usuario');
+  return null;
 }
 
 const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
@@ -682,7 +652,7 @@ async function buildPdf(
   // 2) si no, caemos al fallback basado en `service_id` del registro
   const serviceLogoFile = (() => {
     const direct = (logoCenterFile ?? '').toString().trim();
-    if (direct) return direct;
+    if (direct) return normalizeServiceLogoFile(direct);
     const s = (registro.service_id ?? '').toString().toLowerCase();
     if (s.includes('caterpillar')) return 'caterpillar.png';
     if (s.includes('komatsu')) return 'komatsu.png';
@@ -690,26 +660,48 @@ async function buildPdf(
     if (s.includes('danfoss')) return 'danfoss.png';
     return 'caterpillar.png';
   })();
-  const logoCenter = await loadImage(serviceLogoFile);
+  let logoCenter = await loadImage(serviceLogoFile);
+  if (!logoCenter && serviceLogoFile !== 'caterpillar.png') {
+    console.warn('[generate-ctpat-pdf] logo no encontrado, fallback:', serviceLogoFile);
+    logoCenter = await loadImage('caterpillar.png');
+  }
 
   const logoRight = await loadImage('oea.jpeg'); // siempre lado derecho
   const logoWatermark = await loadImage('logo.png'); // fondo de cada página
+
+  /**
+   * Fondo de agua uniforme en todas las páginas:
+   * - Centrado exacto
+   * - Misma escala relativa para cualquier tamaño de hoja
+   * - Conserva proporción del logo
+   */
+  function drawCenteredWatermark(page: PDFPage) {
+    if (!logoWatermark) return;
+    const { width: pageW, height: pageH } = page.getSize();
+    const maxW = pageW * 0.58;
+    const maxH = pageH * 0.58;
+    const naturalW = logoWatermark.width;
+    const naturalH = logoWatermark.height;
+    if (!naturalW || !naturalH) return;
+
+    const scale = Math.min(maxW / naturalW, maxH / naturalH);
+    const wmW = naturalW * scale;
+    const wmH = naturalH * scale;
+
+    page.drawImage(logoWatermark, {
+      x: pageW / 2 - wmW / 2,
+      y: pageH / 2 - wmH / 2,
+      width: wmW,
+      height: wmH,
+      opacity: 0.05
+    });
+  }
 
   const page1 = pdfDoc.addPage([595.28, 841.89]); // A4
   const { width, height } = page1.getSize();
   const mechHabilitadaGlobal = ((registro.inspeccion_mecanica as any)?.habilitada ?? false) === true;
 
-  // Fondo de agua (logo centrado, muy tenue)
-  if (logoWatermark) {
-    const wmDims = logoWatermark.scale(0.5);
-    page1.drawImage(logoWatermark, {
-      x: width / 2 - wmDims.width / 2,
-      y: height / 2 - wmDims.height / 2,
-      width: wmDims.width,
-      height: wmDims.height,
-      opacity: 0.05
-    });
-  }
+  drawCenteredWatermark(page1);
 
   // Encabezado pegado al borde superior (margen mínimo)
   const topMargin = 8;
@@ -1219,16 +1211,7 @@ async function buildPdf(
   // ========== PÁGINA 2: Cheklist Inspección Agrícola + Puntos de verificación del tracto ==========
   const page2 = pdfDoc.addPage([595.28, 841.89]);
   const height2 = page2.getSize().height;
-  if (logoWatermark) {
-    const wmDims = logoWatermark.scale(0.5);
-    page2.drawImage(logoWatermark, {
-      x: width / 2 - wmDims.width / 2,
-      y: height2 / 2 - wmDims.height / 2,
-      width: wmDims.width,
-      height: wmDims.height,
-      opacity: 0.05
-    });
-  }
+  drawCenteredWatermark(page2);
 
   const secH2 = 18;
   let cy = height2 - 36;
@@ -1428,16 +1411,7 @@ async function buildPdf(
   if (mechHabilitadaGlobal) {
     const page3 = pdfDoc.addPage([595.28, 841.89]);
     const height3 = page3.getSize().height;
-    if (mechHabilitadaGlobal && logoWatermark) {
-      const wmDims = logoWatermark.scale(0.5);
-      page3.drawImage(logoWatermark, {
-        x: width / 2 - wmDims.width / 2,
-        y: height3 / 2 - wmDims.height / 2,
-        width: wmDims.width,
-        height: wmDims.height,
-        opacity: 0.05
-      });
-    }
+    drawCenteredWatermark(page3);
 
   let cy3 = height3 - 40;
   // Folio en la esquina superior derecha (mismo folio en todas las páginas).
@@ -1897,16 +1871,7 @@ async function buildPdf(
   const page4 = pdfDoc.addPage([595.28, 841.89]);
   const height4 = page4.getSize().height;
 
-  if (logoWatermark) {
-    const wmDims = logoWatermark.scale(0.5);
-    page4.drawImage(logoWatermark, {
-      x: width / 2 - wmDims.width / 2,
-      y: height4 / 2 - wmDims.height / 2,
-      width: wmDims.width,
-      height: wmDims.height,
-      opacity: 0.05
-    });
-  }
+  drawCenteredWatermark(page4);
 
   const marginP4 = 32;
   let yP4 = height4 - marginP4;

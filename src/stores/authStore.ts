@@ -59,7 +59,7 @@ function shouldRefreshAccessToken(accessToken: string | undefined, skewSec = JWT
 export function normalizeServiceLogoFile(v: string | null): string {
   if (!v) return 'caterpillar.png';
   const s = v.toString().toLowerCase();
-  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return v.toString();
+  if (s.endsWith('.png') || s.endsWith('.jpg') || s.endsWith('.jpeg')) return s;
   if (s.includes('caterpillar')) return 'caterpillar.png';
   if (s.includes('komatsu')) return 'komatsu.png';
   if (s.includes('john_deere') || s.includes('john')) return 'john_deere.png';
