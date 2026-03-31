@@ -6,7 +6,7 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, degrees } from 'npm:pdf-lib@1.17.1';
+import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, PDFImage, degrees } from 'npm:pdf-lib@1.17.1';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -727,37 +727,46 @@ async function buildPdf(
   });
 
   // 1) Logos arriba (misma disposición: izquierda, centro, derecha)
-  const logoWidth = 70;
-  const logoHeight = 45;
+  const logoWidth = 62;
+  const logoHeight = 36;
   const logosGapFromTop = 12;
   const logosY = cursorY - logosGapFromTop - logoHeight / 2;
   const leftX = 32 + 10;
   const rightX = width - 32 - 10 - logoWidth;
   const centerX = width / 2 - logoWidth / 2;
 
-  if (logoLeft) {
-    page1.drawImage(logoLeft, {
-      x: leftX,
-      y: logosY - logoHeight / 2,
-      width: logoWidth,
-      height: logoHeight
+  /** Dibuja el logo contenido dentro de una caja fija, centrado y sin deformar proporción. */
+  function drawLogoContained(
+    page: PDFPage,
+    img: PDFImage,
+    x: number,
+    y: number,
+    boxW: number,
+    boxH: number
+  ) {
+    const iw = img.width || 1;
+    const ih = img.height || 1;
+    const scale = Math.min(boxW / iw, boxH / ih);
+    const w = iw * scale;
+    const h = ih * scale;
+    const drawX = x + (boxW - w) / 2;
+    const drawY = y + (boxH - h) / 2;
+    page.drawImage(img, {
+      x: drawX,
+      y: drawY,
+      width: w,
+      height: h
     });
+  }
+
+  if (logoLeft) {
+    drawLogoContained(page1, logoLeft, leftX, logosY - logoHeight / 2, logoWidth, logoHeight);
   }
   if (logoCenter) {
-    page1.drawImage(logoCenter, {
-      x: centerX,
-      y: logosY - logoHeight / 2,
-      width: logoWidth,
-      height: logoHeight
-    });
+    drawLogoContained(page1, logoCenter, centerX, logosY - logoHeight / 2, logoWidth, logoHeight);
   }
   if (logoRight) {
-    page1.drawImage(logoRight, {
-      x: rightX,
-      y: logosY - logoHeight / 2,
-      width: logoWidth,
-      height: logoHeight
-    });
+    drawLogoContained(page1, logoRight, rightX, logosY - logoHeight / 2, logoWidth, logoHeight);
   }
 
   // 2) Título debajo de los logos, centrado
