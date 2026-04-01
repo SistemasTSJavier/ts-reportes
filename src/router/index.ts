@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import { useAuthStore } from '../stores/authStore';
+import { useToastStore } from '../stores/toastStore';
+import { preflightCameraForRegistro } from '../utils/cameraPermission';
 import HomeView from '../views/HomeView.vue';
 import RegistroView from '../views/RegistroView.vue';
 import PrivacyView from '../views/PrivacyView.vue';
@@ -60,6 +62,25 @@ router.beforeEach(async (to, _from, next) => {
       } catch {
         /* seguir navegando; el guard de pantalla mostrará error si hace falta */
       }
+    }
+  }
+
+  if (name === 'registro-new' || name === 'registro-edit') {
+    const cam = await preflightCameraForRegistro();
+    if (cam === 'denied') {
+      const toast = useToastStore();
+      toast.error(
+        'Cámara requerida',
+        'Debes permitir el acceso a la cámara para usar el registro. Revisa los permisos del sitio en el navegador e inténtalo de nuevo.'
+      );
+      return next({ name: 'home', replace: true });
+    }
+    if (cam === 'unsupported') {
+      const toast = useToastStore();
+      toast.info(
+        'Cámara no disponible',
+        'Este entorno no permite solicitar la cámara (por ejemplo HTTP sin HTTPS). Podrás adjuntar fotos desde la galería si el navegador lo permite.'
+      );
     }
   }
 
