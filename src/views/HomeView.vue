@@ -42,6 +42,29 @@
       </div>
     </section>
 
+    <section
+      v-if="cameraBlockedBanner"
+      class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950"
+      role="status"
+    >
+      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+        <div class="min-w-0">
+          <p class="font-semibold">Permiso de cámara necesario</p>
+          <p class="mt-1 text-amber-900/90 leading-snug">
+            Si rechazaste el acceso, el navegador ya no muestra el mismo aviso: abre el menú del sitio (candado o ⋮ en la barra de dirección),
+            permite <strong>Cámara</strong> para esta página y, si no cambia, recarga la pestaña. Después vuelve a pulsar «Nuevo registro».
+          </p>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+          @click="dismissCameraBlockedBanner"
+        >
+          Ocultar aviso
+        </button>
+      </div>
+    </section>
+
     <section class="card p-4 sm:p-5">
       <div class="space-y-3">
         <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
@@ -192,6 +215,10 @@ import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
 import { isGoogleDriveAccessError, isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import {
+  clearRegistroCameraBlockedHint,
+  hasRegistroCameraBlockedHint
+} from '../utils/cameraPermission';
 import { useAuthStore } from '../stores/authStore';
 import { usePwaStore } from '../stores/pwaStore';
 import { useSyncStore, type SyncKind } from '../stores/syncStore';
@@ -213,6 +240,16 @@ const registros = ref<Array<{
 const loadingRegistros = ref(false);
 const uploadingLogo = ref(false);
 const logoInputRef = ref<HTMLInputElement | null>(null);
+const cameraBlockedBanner = ref(false);
+
+function refreshCameraBlockedBanner() {
+  cameraBlockedBanner.value = hasRegistroCameraBlockedHint();
+}
+
+function dismissCameraBlockedBanner() {
+  clearRegistroCameraBlockedHint();
+  cameraBlockedBanner.value = false;
+}
 
 const movementOptions = [
   { label: 'Todos', value: 'all' },
@@ -331,12 +368,16 @@ async function loadRegistros() {
 
 onMounted(() => {
   loadRegistros();
+  refreshCameraBlockedBanner();
 });
 
 watch(
   () => router.currentRoute.value.name,
   (name) => {
-    if (name === 'home') loadRegistros();
+    if (name === 'home') {
+      loadRegistros();
+      refreshCameraBlockedBanner();
+    }
   }
 );
 
