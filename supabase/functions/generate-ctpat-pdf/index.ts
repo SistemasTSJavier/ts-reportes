@@ -693,6 +693,9 @@ async function buildPdf(
 
   const logoRight = await loadImage('oea.jpeg'); // siempre lado derecho
   const logoWatermark = await loadImage('logo.png'); // fondo de cada página
+  if (!logoWatermark) {
+    console.error('[generate-ctpat-pdf] Failed to load logo.png for watermark');
+  }
 
   /**
    * Fondo de agua uniforme en todas las páginas:
@@ -1797,7 +1800,7 @@ async function buildPdf(
     y: cyE,
     size: 13,
     font: fontBold,
-    color: rgb(0, 0, 0)
+    color: rgb(0, 0, 0.5)
   });
   cyE -= 14;
 

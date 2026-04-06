@@ -23,6 +23,35 @@ const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
 /** Supabase a veces omite `provider_token` tras refresh; respaldo solo para el mismo usuario. */
 const GOOGLE_PROVIDER_TOKEN_KEY = 'ts_google_provider_token_v1';
 const GOOGLE_PROVIDER_TOKEN_UID_KEY = 'ts_google_provider_token_uid_v1';
+const GOOGLE_PROVIDER_TOKEN_SAVED_AT_KEY = 'ts_google_provider_token_saved_at_v1';
+/** Access token de Google ~1 h; usar uno caducado provoca 401 en Drive y el mensaje de «reconectar». */
+const GOOGLE_ACCESS_TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
+
+function decodeGoogleAccessTokenExpSec(token: string): number | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const payload = JSON.parse(atob(b64)) as { exp?: number };
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** true = no usar este token para Drive (caducado o caché sin referencia de tiempo). */
+function shouldDiscardGoogleAccessToken(token: string, savedAtMs: number | null): boolean {
+  const expSec = decodeGoogleAccessTokenExpSec(token);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (expSec != null) {
+    return nowSec >= expSec - 120;
+  }
+  if (savedAtMs == null || !Number.isFinite(savedAtMs)) {
+    return true;
+  }
+  return Date.now() - savedAtMs > GOOGLE_ACCESS_TOKEN_MAX_AGE_MS;
+}
 
 /**
  * Varios listeners (visibility + focus + cola sync) pueden llamar a refresh a la vez.
@@ -177,18 +206,52 @@ export const useAuthStore = defineStore('auth', {
       if (typeof token === 'string' && token.length > 0) {
         localStorage.setItem(GOOGLE_PROVIDER_TOKEN_UID_KEY, userId);
         localStorage.setItem(GOOGLE_PROVIDER_TOKEN_KEY, token);
+        try {
+          localStorage.setItem(GOOGLE_PROVIDER_TOKEN_SAVED_AT_KEY, String(Date.now()));
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    getGoogleProviderTokenSavedAtMs(): number | null {
+      try {
+        const raw = localStorage.getItem(GOOGLE_PROVIDER_TOKEN_SAVED_AT_KEY);
+        if (!raw) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+      } catch {
+        return null;
       }
     },
     getGoogleProviderTokenFallback(userId: string | null | undefined): string | null {
       if (!userId) return null;
       const uid = localStorage.getItem(GOOGLE_PROVIDER_TOKEN_UID_KEY);
       const t = localStorage.getItem(GOOGLE_PROVIDER_TOKEN_KEY);
-      if (uid === userId && typeof t === 'string' && t.length > 0) return t;
-      return null;
+      if (uid !== userId || typeof t !== 'string' || t.length === 0) return null;
+
+      let savedAt = this.getGoogleProviderTokenSavedAtMs();
+      if (savedAt == null) {
+        savedAt = Date.now();
+        try {
+          localStorage.setItem(GOOGLE_PROVIDER_TOKEN_SAVED_AT_KEY, String(savedAt));
+        } catch {
+          /* ignore */
+        }
+      }
+      if (shouldDiscardGoogleAccessToken(t, savedAt)) {
+        this.clearGoogleProviderTokenCache();
+        return null;
+      }
+      return t;
     },
     clearGoogleProviderTokenCache() {
       localStorage.removeItem(GOOGLE_PROVIDER_TOKEN_KEY);
       localStorage.removeItem(GOOGLE_PROVIDER_TOKEN_UID_KEY);
+      try {
+        localStorage.removeItem(GOOGLE_PROVIDER_TOKEN_SAVED_AT_KEY);
+      } catch {
+        /* ignore */
+      }
     },
 
     /**
@@ -206,17 +269,36 @@ export const useAuthStore = defineStore('auth', {
         data: { session }
       } = await supabase.auth.getSession();
       const fromSession = this.getProviderTokenFromSession(session);
-      const token =
-        fromSession ?? this.googleAccessToken ?? this.getGoogleProviderTokenFallback(uid) ?? null;
+      const savedAt = this.getGoogleProviderTokenSavedAtMs();
 
-      if (!token) {
-        throw new Error(
-          'No hay token de Google para Drive. Cierra sesión y vuelve a entrar con Google (acepta permisos de Drive al iniciar).'
-        );
+      if (fromSession && !shouldDiscardGoogleAccessToken(fromSession, savedAt)) {
+        this.googleAccessToken = fromSession;
+        this.rememberGoogleProviderToken(uid, fromSession);
+        return fromSession;
       }
-      this.googleAccessToken = token;
-      this.rememberGoogleProviderToken(uid, token);
-      return token;
+      if (fromSession && shouldDiscardGoogleAccessToken(fromSession, savedAt)) {
+        this.clearGoogleProviderTokenCache();
+        this.googleAccessToken = null;
+      }
+
+      const fromFallback = this.getGoogleProviderTokenFallback(uid);
+      if (fromFallback) {
+        this.googleAccessToken = fromFallback;
+        return fromFallback;
+      }
+
+      const mem = this.googleAccessToken;
+      if (mem && !shouldDiscardGoogleAccessToken(mem, this.getGoogleProviderTokenSavedAtMs())) {
+        return mem;
+      }
+      if (mem) {
+        this.googleAccessToken = null;
+        this.clearGoogleProviderTokenCache();
+      }
+
+      throw new Error(
+        'No hay token de Google para Drive. Cierra sesión y vuelve a entrar con Google (acepta permisos de Drive al iniciar).'
+      );
     },
     async getDriveConfigRow(userId: string) {
       const { data, error } = await supabase

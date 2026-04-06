@@ -158,6 +158,8 @@ async function invokeGenerateCtpatPdf(
         }
         if (isGoogleDriveAccessError(message) && driveRound === 0) {
           await auth.refreshSessionForApi({ force: true });
+          auth.clearGoogleProviderTokenCache();
+          auth.googleAccessToken = null;
           googleDriveAccessToken = await auth.ensureGoogleDriveAccessTokenForApi();
           continue driveRetry;
         }
@@ -422,16 +424,13 @@ export const useSyncStore = defineStore('sync', {
           };
         }
 
+        /** No usar solo la caché en memoria: el access token de Google caduca (~1 h) y provoca 401 en Drive. */
         let prefetchedDriveToken: string | undefined;
         if (queueNeedsDrivePdf) {
-          if (authStore.googleAccessToken) {
-            prefetchedDriveToken = authStore.googleAccessToken;
-          } else {
-            try {
-              prefetchedDriveToken = await authStore.ensureGoogleDriveAccessTokenForApi();
-            } catch {
-              prefetchedDriveToken = undefined;
-            }
+          try {
+            prefetchedDriveToken = await authStore.ensureGoogleDriveAccessTokenForApi();
+          } catch {
+            prefetchedDriveToken = undefined;
           }
         }
 
