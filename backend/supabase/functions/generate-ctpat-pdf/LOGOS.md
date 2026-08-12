@@ -37,6 +37,16 @@ Si usas otro almacenamiento (CDN, S3, etc.):
 
 ---
 
+## Formatos de logo (PWA → PDF)
+
+La PWA acepta **PNG, JPEG, JPG y WebP** al configurar el logo.
+
+`pdf-lib` (Edge Function) solo incrusta **PNG y JPEG**. Por eso, al subir desde «Configurar logo», la app **normaliza siempre a PNG real** y guarda `logos/<user_id>.png` en el bucket. Así el centro del encabezado del PDF funciona con cualquiera de esos formatos de origen.
+
+Si un logo antiguo quedó en Storage como WebP (o WebP renombrado a `.png`), **vuelve a subirlo** desde la PWA para regenerar el PNG.
+
+---
+
 ## Logos nuevos + asignación por cuenta (`user_drive_config`)
 
 La tabla en la base de datos es **`public.user_drive_config`**. La columna que guarda el **nombre del archivo** del logo (debe coincidir con el objeto en Storage) es **`service_logo_file`** (por ejemplo `danfoss.png`).

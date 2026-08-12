@@ -2,6 +2,7 @@ import type { Session } from '@supabase/supabase-js';
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 import { SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
+import { normalizeServiceLogoToPng } from '../utils/normalizeServiceLogoUpload';
 import { useAccessStore } from './accessStore';
 import { useToastStore } from './toastStore';
 const LOGO_BUCKET = ((import.meta.env.VITE_LOGO_BUCKET as string | undefined)?.trim() || 'ctpat-logs');
@@ -180,9 +181,9 @@ export const useAuthStore = defineStore('auth', {
     },
     async uploadServiceLogo(file: File): Promise<string> {
       if (!this.userId) throw new Error('No hay usuario autenticado.');
-      const rawName = file.name.toLowerCase();
-      const ext = rawName.endsWith('.jpg') || rawName.endsWith('.jpeg') ? 'jpg' : 'png';
-      const objectPath = `logos/${this.userId}.${ext}`;
+      // pdf-lib solo incrusta PNG/JPEG: normalizamos WebP/PNG/JPEG → PNG real antes de Storage.
+      const pngFile = await normalizeServiceLogoToPng(file);
+      const objectPath = `logos/${this.userId}.png`;
 
       // Si ya hay fila en BD, no pasar por ensureDriveConfigIfNeeded (evita refresh de sesión que
       // puede quitar `provider_token` justo antes de guardar un registro / PDF).
@@ -199,11 +200,18 @@ export const useAuthStore = defineStore('auth', {
         await this.ensureDriveConfigIfNeeded();
       }
 
-      const { error: upErr } = await supabase.storage.from(LOGO_BUCKET).upload(objectPath, file, {
+      const { error: upErr } = await supabase.storage.from(LOGO_BUCKET).upload(objectPath, pngFile, {
         upsert: true,
-        contentType: ext === 'jpg' ? 'image/jpeg' : 'image/png'
+        contentType: 'image/png',
+        cacheControl: '3600'
       });
       if (upErr) throw new Error(`No se pudo subir logo: ${upErr.message}`);
+
+      // Limpia variantes antiguas (.jpg/.jpeg) para que el PDF no tome un archivo obsoleto.
+      const stale = [`logos/${this.userId}.jpg`, `logos/${this.userId}.jpeg`];
+      void supabase.storage.from(LOGO_BUCKET).remove(stale).then(({ error }) => {
+        if (error) console.warn('[uploadServiceLogo] limpieza jpg/jpeg:', error.message);
+      });
 
       const { error: cfgErr } = await supabase
         .from('user_drive_config')

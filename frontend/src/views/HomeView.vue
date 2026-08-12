@@ -22,7 +22,7 @@
         <input
           ref="logoInputRef"
           type="file"
-          accept="image/png,image/jpeg,image/jpg"
+          :accept="SERVICE_LOGO_ACCEPT"
           class="hidden"
           @change="onPickLogo"
         />
@@ -33,6 +33,9 @@
         >
           {{ uploadingLogo ? 'Subiendo logo...' : 'Configurar logo' }}
         </button>
+        <p class="text-[11px] text-slate-500 sm:col-span-2">
+          PNG, JPEG, JPG o WebP (se convierte a PNG para el PDF).
+        </p>
         <button
           class="btn-primary w-full sm:w-auto shrink-0"
           @click="goNew"
@@ -235,6 +238,7 @@ import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
 import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
 import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import { isAllowedServiceLogoFile, SERVICE_LOGO_ACCEPT } from '../utils/normalizeServiceLogoUpload';
 import {
   clearRegistroCameraBlockedHint,
   hasRegistroCameraBlockedHint
@@ -462,10 +466,15 @@ async function onPickLogo(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
+  if (!isAllowedServiceLogoFile(file)) {
+    toastStore.error('Logo', 'Formato no soportado. Usa PNG, JPEG, JPG o WebP.');
+    input.value = '';
+    return;
+  }
   uploadingLogo.value = true;
   try {
     await authStore.uploadServiceLogo(file);
-    toastStore.success('Logo actualizado', 'El logo se guardó para tu servicio.');
+    toastStore.success('Logo actualizado', 'El logo se normalizó a PNG y se guardó para tu servicio.');
   } catch (e) {
     toastStore.error('Logo', e instanceof Error ? e.message : 'No se pudo actualizar el logo.');
   } finally {

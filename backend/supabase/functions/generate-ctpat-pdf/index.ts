@@ -667,6 +667,21 @@ function isJpegImageBytes(bytes: Uint8Array): boolean {
   return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8;
 }
 
+/** WebP: RIFF....WEBP (pdf-lib no lo incrusta). */
+function isWebpImageBytes(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  );
+}
+
 /** Incrusta bytes de imagen sin lanzar (evita HTTP 500 «SOI not found in JPEG»). */
 async function embedImageBytesSafe(
   pdfDoc: PDFDocument,
@@ -676,6 +691,13 @@ async function embedImageBytesSafe(
   try {
     if (isPngImageBytes(bytes)) return await pdfDoc.embedPng(bytes);
     if (isJpegImageBytes(bytes)) return await pdfDoc.embedJpg(bytes);
+    if (isWebpImageBytes(bytes)) {
+      // La PWA convierte WebP→PNG al subir; si llega WebP aquí es un archivo legacy/mal etiquetado.
+      console.warn(
+        '[generate-ctpat-pdf] Imagen WebP omitida (pdf-lib no la soporta). Re-sube el logo desde Configurar logo (PNG/JPEG/JPG/WebP).'
+      );
+      return null;
+    }
     try {
       return await pdfDoc.embedPng(bytes);
     } catch {
