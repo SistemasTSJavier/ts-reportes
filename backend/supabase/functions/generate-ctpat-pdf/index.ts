@@ -2605,6 +2605,30 @@ Deno.serve(async (req) => {
       return jsonError(origin, 403, 'Forbidden: registro pertenece a otra organización');
     }
 
+    // Idempotencia: no regenerar PDF ni volver a subir si ya quedó sincronizado.
+    const alreadySynced =
+      (row.sync_status ?? '').toString().trim().toLowerCase() === 'synced' &&
+      Boolean(row.drive_file_id && String(row.drive_file_id).trim());
+    if (alreadySynced && !driveOnly) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          already: true,
+          driveSynced: true,
+          needsDriveSync: false,
+          driveFile: { id: row.drive_file_id },
+          storagePath: row.pdf_storage_path
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders(origin)
+          }
+        }
+      );
+    }
+
     const mergeEvidencias = (
       base: RegistroRow['evidencias_exif'],
       uploadedImages: { name: string; id: string }[]

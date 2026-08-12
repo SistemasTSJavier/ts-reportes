@@ -236,12 +236,31 @@ export const useAuthStore = defineStore('auth', {
         await this.ensureDriveConfigIfNeeded();
       }
 
-      const { error: upErr } = await supabase.storage.from(LOGO_BUCKET).upload(objectPath, pngFile, {
+      const uploadOpts = {
         upsert: true,
         contentType: 'image/png',
         cacheControl: '3600'
-      });
-      if (upErr) throw new Error(`No se pudo subir logo: ${upErr.message}`);
+      } as const;
+
+      let upErr = (
+        await supabase.storage.from(LOGO_BUCKET).upload(objectPath, pngFile, uploadOpts)
+      ).error;
+
+      // Si upsert choca con RLS (archivo previo / políticas), borra e inserta de nuevo.
+      if (upErr) {
+        await supabase.storage.from(LOGO_BUCKET).remove([objectPath]);
+        upErr = (
+          await supabase.storage.from(LOGO_BUCKET).upload(objectPath, pngFile, {
+            ...uploadOpts,
+            upsert: false
+          })
+        ).error;
+      }
+      if (upErr) {
+        throw new Error(
+          `No se pudo subir logo: ${upErr.message}. Si acabas de limpiar la BD, ejecuta scripts/fix-storage-logo-rls.sql en Supabase.`
+        );
+      }
 
       // Limpia variantes antiguas (.jpg/.jpeg) para que el PDF no tome un archivo obsoleto.
       const stale = [`logos/${this.userId}.jpg`, `logos/${this.userId}.jpeg`];

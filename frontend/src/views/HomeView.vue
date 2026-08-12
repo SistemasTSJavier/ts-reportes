@@ -418,18 +418,19 @@ async function loadRegistros() {
     registros.value = [];
   } else {
     registros.value = data ?? [];
-    // Rehidrata la cola desde BD para registros que existen pero aún no se han subido a Drive.
-    // Esto evita falsos "Sincronización al día" después de recargas o cambios de dispositivo.
-    const pendingDriveSync = (data ?? []).filter(
-      (r) => r.sync_status !== 'synced' || !r.drive_file_id
-    );
+    // Solo rehidrata trabajos claramente incompletos (pending/null).
+    // No reencola 'synced' ni 'error' en cada reload (evita regenerar el mismo PDF).
+    const pendingDriveSync = (data ?? []).filter((r) => {
+      if (!r?.id) return false;
+      if (r.drive_file_id) return false;
+      const s = (r.sync_status ?? '').toString().trim().toLowerCase();
+      return s === '' || s === 'pending';
+    });
     for (const row of pendingDriveSync) {
-      if (row?.id) {
-        await syncStore.enqueueGeneratePdf({
-          registroId: row.id,
-          folio: row.folio_pdf ?? undefined
-        });
-      }
+      await syncStore.enqueueGeneratePdf({
+        registroId: row.id,
+        folio: row.folio_pdf ?? undefined
+      });
     }
     if (pendingDriveSync.length > 0) {
       await syncStore.processQueue();

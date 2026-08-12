@@ -60,8 +60,42 @@ function registroExpiresAtIso(): string {
 
 const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
 const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
+/** Registro IDs cuyo PDF ya se generó/sincronizó con éxito en este dispositivo. */
+const COMPLETED_PDF_IDS_KEY = 'ts_ctpat_pdf_completed_ids_v1';
 const IDB_NAME = 'ts_ctpat_sync_db_v1';
 const IDB_STORE = 'kv';
+
+const MAX_COMPLETED_PDF_IDS = 400;
+
+function readCompletedPdfIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COMPLETED_PDF_IDS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((x): x is string => typeof x === 'string' && x.length > 0));
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberCompletedPdfId(registroId: string): void {
+  const id = registroId.trim();
+  if (!id) return;
+  const set = readCompletedPdfIds();
+  set.add(id);
+  const list = [...set];
+  const trimmed = list.length > MAX_COMPLETED_PDF_IDS ? list.slice(-MAX_COMPLETED_PDF_IDS) : list;
+  try {
+    localStorage.setItem(COMPLETED_PDF_IDS_KEY, JSON.stringify(trimmed));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function wasPdfCompletedLocally(registroId: string): boolean {
+  return readCompletedPdfIds().has(registroId.trim());
+}
 
 /** IndexedDB no puede clonar Proxies (estado reactivo de Pinia/Vue). */
 function cloneForIndexedDb<T>(value: T): T {
@@ -507,16 +541,43 @@ export const useSyncStore = defineStore('sync', {
       await this.persist();
     },
     async enqueueGeneratePdf(payload: GeneratePdfPayload) {
+      const registroId = (payload.registroId ?? '').toString().trim();
+      if (!registroId) return;
+
+      // Ya sincronizado en este dispositivo → no volver a encolar al recargar.
+      if (wasPdfCompletedLocally(registroId)) {
+        return;
+      }
+
       const now = new Date().toISOString();
-      const id = `pdf_${payload.registroId}`;
-      const alreadyQueued = this.queue.some((q) => q.id === id && q.status !== 'done');
+      const id = `pdf_${registroId}`;
+      const alreadyQueued = this.queue.some((q) => {
+        if (q.id === id && q.status !== 'done') return true;
+        if (q.kind !== 'generate_pdf') return false;
+        const rid = ((q.payload as GeneratePdfPayload).registroId ?? '').toString().trim();
+        return rid === registroId && (q.status === 'pending' || q.status === 'processing' || q.status === 'error');
+      });
       if (alreadyQueued) {
         return;
       }
+
+      // Si en el historial local ya quedó done, no regenerar.
+      const doneBefore = this.history.some((h) => {
+        if (h.status !== 'done') return false;
+        if (h.id === id) return true;
+        if (h.kind !== 'generate_pdf') return false;
+        const rid = ((h.payload as GeneratePdfPayload).registroId ?? '').toString().trim();
+        return rid === registroId;
+      });
+      if (doneBefore) {
+        rememberCompletedPdfId(registroId);
+        return;
+      }
+
       const item: SyncItem = {
         id,
         kind: 'generate_pdf',
-        payload,
+        payload: { ...payload, registroId },
         status: 'pending',
         updatedAt: now
       };
@@ -582,8 +643,33 @@ export const useSyncStore = defineStore('sync', {
               if (!rid) {
                 throw new Error('Cola de sincronización: falta el id del registro para generar el PDF.');
               }
+
+              // Idempotencia: si BD ya lo marca sincronizado, no regenerar PDF.
+              const { data: existingReg } = await supabase
+                .from('registros_ctpat')
+                .select('sync_status, drive_file_id, pdf_storage_path')
+                .eq('id', rid)
+                .maybeSingle();
+
+              const status = (existingReg?.sync_status ?? '').toString().trim().toLowerCase();
+              const alreadySynced =
+                status === 'synced' ||
+                Boolean(existingReg?.drive_file_id) ||
+                wasPdfCompletedLocally(rid);
+
+              if (alreadySynced) {
+                rememberCompletedPdfId(rid);
+                item.status = 'done';
+                item.lastError = undefined;
+                item.updatedAt = new Date().toISOString();
+                this.history.unshift({ ...item });
+                hadSuccess = true;
+                continue;
+              }
+
               await invokeGenerateCtpatPdf(rid);
 
+              rememberCompletedPdfId(rid);
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
@@ -684,6 +770,7 @@ export const useSyncStore = defineStore('sync', {
 
               await invokeGenerateCtpatPdf(registroId);
 
+              rememberCompletedPdfId(registroId);
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
