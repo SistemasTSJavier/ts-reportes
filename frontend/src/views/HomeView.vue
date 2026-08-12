@@ -28,13 +28,24 @@
         />
         <button
           class="btn-secondary w-full sm:w-auto shrink-0"
-          :disabled="uploadingLogo"
+          :disabled="uploadingLogo || authStore.logoLocked"
           @click="triggerLogoPicker"
         >
-          {{ uploadingLogo ? 'Subiendo logo...' : 'Configurar logo' }}
+          {{
+            uploadingLogo
+              ? 'Subiendo logo...'
+              : authStore.logoLocked
+                ? 'Logo configurado'
+                : 'Configurar logo'
+          }}
         </button>
         <p class="text-[11px] text-slate-500 sm:col-span-2">
-          PNG, JPEG, JPG o WebP (se convierte a PNG para el PDF).
+          <template v-if="authStore.logoLocked">
+            Logo fijado (solo una vez). Si necesitas cambiarlo, contacta al administrador.
+          </template>
+          <template v-else>
+            PNG, JPEG, JPG o WebP (se convierte a PNG para el PDF). Solo puedes configurarlo una vez.
+          </template>
         </p>
         <button
           class="btn-primary w-full sm:w-auto shrink-0"
@@ -59,17 +70,27 @@
             maxlength="120"
             autocomplete="off"
             placeholder="Ej. Transportes López"
-            class="flex-1 min-w-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-tactical-blue/30 focus:border-tactical-blue"
+            class="flex-1 min-w-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-tactical-blue/30 focus:border-tactical-blue disabled:bg-slate-100 disabled:text-slate-500"
+            :disabled="authStore.onedriveSubfolderLocked || savingOnedriveFolder"
           />
           <button
             type="button"
             class="btn-secondary shrink-0 whitespace-nowrap"
-            :disabled="savingOnedriveFolder"
+            :disabled="authStore.onedriveSubfolderLocked || savingOnedriveFolder"
             @click="saveOnedriveFolderDraft"
           >
-            {{ savingOnedriveFolder ? 'Guardando…' : 'Guardar nombre' }}
+            {{
+              authStore.onedriveSubfolderLocked
+                ? 'Carpeta fijada'
+                : savingOnedriveFolder
+                  ? 'Guardando…'
+                  : 'Guardar nombre'
+            }}
           </button>
         </div>
+        <p v-if="authStore.onedriveSubfolderLocked" class="text-[11px] text-slate-500 mt-2">
+          Carpeta fijada (solo una vez). Contacta al administrador para cambiarla.
+        </p>
       </div>
     </section>
 
@@ -444,6 +465,10 @@ function goNew() {
 }
 
 function triggerLogoPicker() {
+  if (authStore.logoLocked) {
+    toastStore.info('Logo', 'Ya está configurado. Contacta al administrador para cambiarlo.');
+    return;
+  }
   logoInputRef.value?.click();
 }
 

@@ -19,6 +19,10 @@ interface AuthState {
   serviceLogoFile: string | null;
   /** Subcarpeta legible para copias OneDrive/Power Automate; si está vacío el servidor usa el id de usuario */
   onedriveSubfolderName: string | null;
+  /** Tras la 1ª config de logo, el usuario no puede cambiarlo (admin puede desbloquear). */
+  logoLocked: boolean;
+  /** Tras la 1ª config de carpeta OneDrive, el usuario no puede cambiarla. */
+  onedriveSubfolderLocked: boolean;
 }
 
 const AUTH_CACHED_USER_ID_KEY = 'ts_ctpat_cached_user_id_v1';
@@ -99,7 +103,9 @@ export const useAuthStore = defineStore('auth', {
     driveConfigReady: false,
     driveConfigRetryScheduled: false,
     serviceLogoFile: null,
-    onedriveSubfolderName: null
+    onedriveSubfolderName: null,
+    logoLocked: false,
+    onedriveSubfolderLocked: false
   }),
   actions: {
     /**
@@ -170,17 +176,44 @@ export const useAuthStore = defineStore('auth', {
       }
     },
     async getDriveConfigRow(userId: string) {
+      const full = await supabase
+        .from('user_drive_config')
+        .select(
+          'pdf_folder_id, images_folder_id, service_logo_file, onedrive_subfolder_name, logo_locked, onedrive_subfolder_locked'
+        )
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (!full.error) return full.data;
+
+      // Migración de locks aún no aplicada: fallback sin columnas nuevas.
       const { data, error } = await supabase
         .from('user_drive_config')
         .select('pdf_folder_id, images_folder_id, service_logo_file, onedrive_subfolder_name')
         .eq('user_id', userId)
         .maybeSingle();
-
       if (error) throw error;
-      return data;
+      return data
+        ? { ...data, logo_locked: false, onedrive_subfolder_locked: false }
+        : data;
+    },
+    applyDriveConfigRow(cfg: {
+      service_logo_file?: string | null;
+      onedrive_subfolder_name?: string | null;
+      logo_locked?: boolean | null;
+      onedrive_subfolder_locked?: boolean | null;
+    } | null) {
+      if (!cfg) return;
+      this.serviceLogoFile = cfg.service_logo_file ?? null;
+      this.onedriveSubfolderName = cfg.onedrive_subfolder_name?.trim() || null;
+      this.logoLocked = cfg.logo_locked === true;
+      this.onedriveSubfolderLocked = cfg.onedrive_subfolder_locked === true;
     },
     async uploadServiceLogo(file: File): Promise<string> {
       if (!this.userId) throw new Error('No hay usuario autenticado.');
+      if (this.logoLocked) {
+        throw new Error('El logo ya está configurado. Contacta al administrador si necesitas cambiarlo.');
+      }
       // pdf-lib solo incrusta PNG/JPEG: normalizamos WebP/PNG/JPEG → PNG real antes de Storage.
       const pngFile = await normalizeServiceLogoToPng(file);
       const objectPath = `logos/${this.userId}.png`;
@@ -191,12 +224,15 @@ export const useAuthStore = defineStore('auth', {
         const cfg = await this.getDriveConfigRow(this.userId);
         if (cfg) {
           this.driveConfigReady = true;
-          this.serviceLogoFile = cfg.service_logo_file ?? null;
-          this.onedriveSubfolderName = cfg.onedrive_subfolder_name?.trim() || null;
+          this.applyDriveConfigRow(cfg);
+          if (this.logoLocked) {
+            throw new Error('El logo ya está configurado. Contacta al administrador si necesitas cambiarlo.');
+          }
         } else {
           await this.ensureDriveConfigIfNeeded();
         }
-      } catch {
+      } catch (e) {
+        if (e instanceof Error && e.message.includes('ya está configurado')) throw e;
         await this.ensureDriveConfigIfNeeded();
       }
 
@@ -215,23 +251,48 @@ export const useAuthStore = defineStore('auth', {
 
       const { error: cfgErr } = await supabase
         .from('user_drive_config')
-        .update({ service_logo_file: objectPath })
+        .update({ service_logo_file: objectPath, logo_locked: true })
         .eq('user_id', this.userId);
-      if (cfgErr) throw new Error(`No se pudo guardar logo en configuración: ${cfgErr.message}`);
+      if (cfgErr) {
+        const { error: fallbackErr } = await supabase
+          .from('user_drive_config')
+          .update({ service_logo_file: objectPath })
+          .eq('user_id', this.userId);
+        if (fallbackErr) {
+          throw new Error(`No se pudo guardar logo en configuración: ${cfgErr.message}`);
+        }
+      }
 
       this.serviceLogoFile = objectPath;
+      this.logoLocked = true;
       return objectPath;
     },
     async saveOnedriveSubfolderLabel(raw: string) {
       if (!this.userId) throw new Error('No hay usuario autenticado.');
+      if (this.onedriveSubfolderLocked) {
+        throw new Error(
+          'La carpeta OneDrive ya está configurada. Contacta al administrador si necesitas cambiarla.'
+        );
+      }
       const sanitized = sanitizeOnedriveSubfolderName(raw);
       await this.ensureDriveConfigIfNeeded();
+      const patch: Record<string, unknown> = { onedrive_subfolder_name: sanitized };
+      if (sanitized) patch.onedrive_subfolder_locked = true;
       const { error } = await supabase
         .from('user_drive_config')
-        .update({ onedrive_subfolder_name: sanitized })
+        .update(patch)
         .eq('user_id', this.userId);
-      if (error) throw new Error(`No se pudo guardar el nombre de carpeta: ${error.message}`);
+      if (error) {
+        const { error: fallbackErr } = await supabase
+          .from('user_drive_config')
+          .update({ onedrive_subfolder_name: sanitized })
+          .eq('user_id', this.userId);
+        if (fallbackErr) {
+          throw new Error(`No se pudo guardar el nombre de carpeta: ${error.message}`);
+        }
+      }
       this.onedriveSubfolderName = sanitized;
+      if (sanitized) this.onedriveSubfolderLocked = true;
     },
     scheduleDriveConfigRetry() {
       if (this.driveConfigRetryScheduled) return;
@@ -260,8 +321,7 @@ export const useAuthStore = defineStore('auth', {
         const existing = await this.getDriveConfigRow(this.userId);
         if (existing) {
           this.driveConfigReady = true;
-          this.serviceLogoFile = existing.service_logo_file ?? null;
-          this.onedriveSubfolderName = existing.onedrive_subfolder_name?.trim() || null;
+          this.applyDriveConfigRow(existing);
           return;
         }
       } catch (e) {
@@ -283,8 +343,7 @@ export const useAuthStore = defineStore('auth', {
             const row = await this.getDriveConfigRow(this.userId);
             if (row) {
               this.driveConfigReady = true;
-              this.serviceLogoFile = row.service_logo_file ?? null;
-              this.onedriveSubfolderName = row.onedrive_subfolder_name?.trim() || null;
+              this.applyDriveConfigRow(row);
               return;
             }
           } catch (readErr) {
@@ -339,6 +398,8 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.serviceLogoFile = null;
           this.onedriveSubfolderName = null;
+          this.logoLocked = false;
+          this.onedriveSubfolderLocked = false;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           useAccessStore().reset();
         }
@@ -351,6 +412,8 @@ export const useAuthStore = defineStore('auth', {
           this.displayName = null;
           this.serviceLogoFile = null;
           this.onedriveSubfolderName = null;
+          this.logoLocked = false;
+          this.onedriveSubfolderLocked = false;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           useAccessStore().reset();
         } else {
@@ -380,8 +443,7 @@ export const useAuthStore = defineStore('auth', {
 
       if (existing) {
         this.driveConfigReady = true;
-        this.serviceLogoFile = existing.service_logo_file ?? null;
-        this.onedriveSubfolderName = existing.onedrive_subfolder_name?.trim() || null;
+        this.applyDriveConfigRow(existing);
         return;
       }
 
@@ -405,8 +467,7 @@ export const useAuthStore = defineStore('auth', {
           const row = await this.getDriveConfigRow(userId);
           if (row) {
             this.driveConfigReady = true;
-            this.serviceLogoFile = row.service_logo_file ?? null;
-            this.onedriveSubfolderName = row.onedrive_subfolder_name?.trim() || null;
+            this.applyDriveConfigRow(row);
             return;
           }
         }
@@ -415,6 +476,8 @@ export const useAuthStore = defineStore('auth', {
       this.driveConfigReady = true;
       this.serviceLogoFile = logoFile;
       this.onedriveSubfolderName = null;
+      this.logoLocked = false;
+      this.onedriveSubfolderLocked = false;
     },
     async signInWithGoogle() {
       this.loading = true;
@@ -455,6 +518,8 @@ export const useAuthStore = defineStore('auth', {
       this.displayName = null;
       this.serviceLogoFile = null;
       this.onedriveSubfolderName = null;
+      this.logoLocked = false;
+      this.onedriveSubfolderLocked = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       useAccessStore().reset();
     },

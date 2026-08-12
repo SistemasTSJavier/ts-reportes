@@ -26,9 +26,13 @@ const routes: RouteRecordRaw[] = [
     component: ActivacionView
   },
   {
-    path: '/admin',
+    path: '/panel-admin',
     name: 'admin',
     component: AdminView
+  },
+  {
+    path: '/admin',
+    redirect: { name: 'admin' }
   },
   {
     path: '/registro/new',

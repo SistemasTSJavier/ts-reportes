@@ -22,10 +22,10 @@
             <template v-if="auth.isSignedIn">
               <router-link
                 v-if="access.isAdmin"
-                to="/admin"
+                to="/panel-admin"
                 class="hidden sm:inline text-xs font-semibold text-tactical-blue hover:underline"
               >
-                Admin
+                Panel admin
               </router-link>
               <div class="hidden sm:block text-right">
                 <p class="text-xs text-slate-500">Conectado como</p>
@@ -57,7 +57,10 @@
       </div>
     </header>
 
-    <main class="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
+    <main
+      class="flex-1 w-full mx-auto px-4 sm:px-6 py-6 sm:py-8"
+      :class="isAdminRoute ? 'max-w-5xl' : 'max-w-4xl'"
+    >
       <router-view />
     </main>
 
@@ -80,7 +83,8 @@
 <script setup lang="ts">
 import { Analytics } from '@vercel/analytics/vue';
 import { SpeedInsights } from '@vercel/speed-insights/vue';
-import { onBeforeUnmount, onMounted, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { useAccessStore } from './stores/accessStore';
 import { useAuthStore } from './stores/authStore';
 import { usePwaStore } from './stores/pwaStore';
@@ -92,6 +96,8 @@ const auth = useAuthStore();
 const access = useAccessStore();
 const sync = useSyncStore();
 const pwa = usePwaStore();
+const route = useRoute();
+const isAdminRoute = computed(() => route.name === 'admin');
 
 let authSubscription: { unsubscribe: () => void } | null = null;
 /** Renueva JWT antes de que caduque si el usuario deja la pestaña abierta (cola vacía no llama a processQueue). */

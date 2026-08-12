@@ -12,6 +12,15 @@ export interface AccessUserRow {
   updated_at: string;
 }
 
+export interface AdminUserOverviewRow extends AccessUserRow {
+  registros_count: number;
+  service_logo_file: string | null;
+  onedrive_subfolder_name: string | null;
+  logo_locked: boolean;
+  onedrive_subfolder_locked: boolean;
+  has_drive_config: boolean;
+}
+
 export interface AccessCodeRow {
   id: string;
   label: string | null;
@@ -133,6 +142,44 @@ export const useAccessStore = defineStore('access', {
         return { ok: false, users: [], error: row?.error ?? 'No autorizado.' };
       }
       return { ok: true, users: row.users ?? [] };
+    },
+    async adminListUserOverview(): Promise<{
+      ok: boolean;
+      users: AdminUserOverviewRow[];
+      error?: string;
+    }> {
+      const { data, error } = await supabase.rpc('admin_list_user_overview');
+      if (error) {
+        return { ok: false, users: [], error: error.message };
+      }
+      const row = data as { ok?: boolean; users?: AdminUserOverviewRow[]; error?: string } | null;
+      if (!row?.ok) {
+        return { ok: false, users: [], error: row?.error ?? 'No autorizado.' };
+      }
+      return { ok: true, users: row.users ?? [] };
+    },
+    async adminUpdateUserDriveConfig(options: {
+      userId: string;
+      onedriveSubfolder?: string | null;
+      setOnedriveSubfolder?: boolean;
+      logoLocked?: boolean | null;
+      onedriveSubfolderLocked?: boolean | null;
+    }): Promise<{ ok: boolean; error?: string }> {
+      const { data, error } = await supabase.rpc('admin_update_user_drive_config', {
+        p_user_id: options.userId,
+        p_onedrive_subfolder: options.onedriveSubfolder ?? null,
+        p_set_onedrive_subfolder: options.setOnedriveSubfolder === true,
+        p_logo_locked: options.logoLocked ?? null,
+        p_onedrive_subfolder_locked: options.onedriveSubfolderLocked ?? null
+      });
+      if (error) {
+        return { ok: false, error: error.message };
+      }
+      const row = data as { ok?: boolean; error?: string } | null;
+      if (!row?.ok) {
+        return { ok: false, error: row?.error ?? 'No se pudo actualizar.' };
+      }
+      return { ok: true };
     },
     async adminListCodes(): Promise<{ ok: boolean; codes: AccessCodeRow[]; error?: string }> {
       const { data, error } = await supabase.rpc('admin_list_access_codes');

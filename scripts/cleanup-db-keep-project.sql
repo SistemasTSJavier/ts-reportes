@@ -64,6 +64,10 @@ where n.nspname = 'public'
   )
 order by funcion;
 
+-- IMPORTANTE: el cleanup de tablas NO debe borrar funciones.
+-- Si falta next_folio_ctpat, ejecuta scripts/fix-next-folio-ctpat.sql
+
+
 -- =============================================================================
 -- B) BORRAR TABLAS SOBRANTES en public
 --    (todo lo que NO esté en la lista KEEP)
