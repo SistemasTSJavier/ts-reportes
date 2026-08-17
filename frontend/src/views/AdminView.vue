@@ -3,11 +3,28 @@
     <section>
       <h2 class="text-xl font-bold text-slate-800">Panel de administración</h2>
       <p class="text-sm text-slate-500 mt-1">
-        Usuarios, registros, logo, carpeta OneDrive y códigos de acceso. Logo y carpeta se configuran
-        <strong>una sola vez</strong>; aquí puedes desbloquearlos.
+        Usuarios, registros, logo, carpeta OneDrive, códigos de acceso y bitácora de auditoría.
       </p>
     </section>
 
+    <nav class="flex gap-1 border-b border-slate-200" aria-label="Secciones del panel">
+      <button
+        type="button"
+        :class="tabButtonClass('manage')"
+        @click="activeTab = 'manage'"
+      >
+        Gestión
+      </button>
+      <button
+        type="button"
+        :class="tabButtonClass('audit')"
+        @click="switchToAuditTab"
+      >
+        Auditoría
+      </button>
+    </nav>
+
+    <div v-show="activeTab === 'manage'" class="space-y-6">
     <section class="card p-4 sm:p-5 space-y-4">
       <h3 class="text-sm font-semibold text-slate-800">Nuevo código de acceso</h3>
       <div class="grid gap-3 sm:grid-cols-3">
@@ -193,6 +210,140 @@
       </ul>
       <p v-else class="text-sm text-slate-500">Aún no hay códigos.</p>
     </section>
+    </div>
+
+    <div v-show="activeTab === 'audit'" class="space-y-4">
+      <section class="card p-4 sm:p-5 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-semibold text-slate-800">Bitácora de auditoría</h3>
+            <p class="text-xs text-slate-500 mt-0.5">
+              Cambios en registros, acceso y configuración (solo lectura, inmutable).
+            </p>
+          </div>
+          <button
+            type="button"
+            class="text-xs text-tactical-blue font-semibold hover:underline"
+            @click="loadAuditLogs(true)"
+          >
+            Actualizar
+          </button>
+        </div>
+
+        <div class="flex flex-wrap gap-2 items-end">
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">Tabla</label>
+            <select
+              v-model="auditTableFilter"
+              class="rounded-md border border-slate-300 px-2 py-1.5 text-sm bg-white"
+              @change="loadAuditLogs(true)"
+            >
+              <option value="">Todas</option>
+              <option value="registros_ctpat">registros_ctpat</option>
+              <option value="user_access">user_access</option>
+              <option value="user_drive_config">user_drive_config</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">Acción</label>
+            <select
+              v-model="auditActionFilter"
+              class="rounded-md border border-slate-300 px-2 py-1.5 text-sm bg-white"
+              @change="loadAuditLogs(true)"
+            >
+              <option value="">Todas</option>
+              <option value="INSERT">INSERT</option>
+              <option value="UPDATE">UPDATE</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+          </div>
+        </div>
+
+        <p v-if="loadingAudit" class="text-sm text-slate-500">Cargando auditoría…</p>
+        <p v-else-if="auditError" class="text-sm text-rose-700">{{ auditError }}</p>
+        <p v-else-if="auditLogs.length === 0" class="text-sm text-slate-500">
+          Sin eventos de auditoría todavía.
+        </p>
+        <div v-else class="overflow-x-auto -mx-1">
+          <table class="min-w-full text-xs text-left">
+            <thead>
+              <tr class="border-b border-slate-200 text-slate-600">
+                <th class="py-2 pr-3 font-semibold">Fecha</th>
+                <th class="py-2 pr-3 font-semibold">Acción</th>
+                <th class="py-2 pr-3 font-semibold">Tabla</th>
+                <th class="py-2 pr-3 font-semibold">Registro</th>
+                <th class="py-2 pr-3 font-semibold">Usuario</th>
+                <th class="py-2 pr-3 font-semibold">Actor</th>
+                <th class="py-2 font-semibold">Detalle</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <template v-for="log in auditLogs" :key="log.id">
+                <tr class="align-top">
+                  <td class="py-2 pr-3 text-slate-700 whitespace-nowrap">{{ formatDate(log.created_at) }}</td>
+                  <td class="py-2 pr-3">
+                    <span :class="auditActionClass(log.action)">{{ log.action }}</span>
+                  </td>
+                  <td class="py-2 pr-3 font-mono text-[11px] text-slate-700">
+                    {{ shortTableName(log.table_name) }}
+                  </td>
+                  <td class="py-2 pr-3 font-mono text-[11px] text-slate-600 max-w-[8rem] truncate" :title="log.record_id">
+                    {{ log.record_id || '—' }}
+                  </td>
+                  <td class="py-2 pr-3 text-slate-700 max-w-[10rem] truncate" :title="log.subject_email ?? log.subject_user_id ?? ''">
+                    {{ log.subject_email || shortId(log.subject_user_id) }}
+                  </td>
+                  <td class="py-2 pr-3 text-slate-600 max-w-[10rem] truncate" :title="log.actor_email ?? log.actor_user_id ?? ''">
+                    {{ log.actor_email || shortId(log.actor_user_id) || '—' }}
+                  </td>
+                  <td class="py-2">
+                    <button
+                      type="button"
+                      class="text-tactical-blue font-semibold hover:underline"
+                      @click="toggleAuditDetail(log.id)"
+                    >
+                      {{ expandedAuditIds.has(log.id) ? 'Ocultar' : 'Ver' }}
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="expandedAuditIds.has(log.id)">
+                  <td colspan="7" class="pb-3 pt-0">
+                    <div class="grid gap-2 sm:grid-cols-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+                      <div v-if="log.old_data">
+                        <p class="text-[10px] font-semibold uppercase text-slate-500 mb-1">Antes</p>
+                        <pre class="text-[10px] text-slate-700 whitespace-pre-wrap break-all max-h-48 overflow-auto">{{ formatAuditJson(log.old_data) }}</pre>
+                      </div>
+                      <div v-if="log.new_data">
+                        <p class="text-[10px] font-semibold uppercase text-slate-500 mb-1">Después</p>
+                        <pre class="text-[10px] text-slate-700 whitespace-pre-wrap break-all max-h-48 overflow-auto">{{ formatAuditJson(log.new_data) }}</pre>
+                      </div>
+                      <p v-if="!log.old_data && !log.new_data" class="text-[11px] text-slate-500 sm:col-span-2">
+                        Sin datos adjuntos.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="auditLogs.length > 0" class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+          <p class="text-xs text-slate-500">
+            Mostrando {{ auditLogs.length }} de {{ auditTotal }} eventos
+          </p>
+          <button
+            v-if="auditLogs.length < auditTotal"
+            type="button"
+            class="btn-secondary py-1.5 px-3 text-xs"
+            :disabled="loadingAudit"
+            @click="loadAuditLogs(false)"
+          >
+            Cargar más
+          </button>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -202,6 +353,8 @@ import {
   useAccessStore,
   type AccessCodeRow,
   type AdminUserOverviewRow,
+  type AuditLogAction,
+  type AuditLogRow,
   type UserAccessStatus
 } from '../stores/accessStore';
 import { useToastStore } from '../stores/toastStore';
@@ -220,6 +373,28 @@ const codeLabel = ref('');
 const codeMaxUses = ref(1);
 const generatedCode = ref('');
 const folderDrafts = reactive<Record<string, string>>({});
+
+type AdminTab = 'manage' | 'audit';
+const activeTab = ref<AdminTab>('manage');
+
+const auditLogs = ref<AuditLogRow[]>([]);
+const auditTotal = ref(0);
+const auditOffset = ref(0);
+const auditPageSize = 50;
+const loadingAudit = ref(false);
+const auditError = ref('');
+const auditTableFilter = ref('');
+const auditActionFilter = ref<AuditLogAction | ''>('');
+const expandedAuditIds = ref(new Set<string>());
+const auditLoadedOnce = ref(false);
+
+function tabButtonClass(tab: AdminTab): string {
+  const base = 'px-4 py-2 text-sm font-semibold border-b-2 -mb-px transition-colors';
+  if (activeTab.value === tab) {
+    return `${base} border-tactical-blue text-tactical-blue`;
+  }
+  return `${base} border-transparent text-slate-500 hover:text-slate-700`;
+}
 
 function statusLabel(s: UserAccessStatus): string {
   if (s === 'approved') return 'Aprobado';
@@ -243,6 +418,79 @@ function formatDate(iso: string): string {
 
 function logoUrl(file: string | null | undefined): string {
   return getServiceLogoPublicUrl(file);
+}
+
+function shortTableName(name: string): string {
+  return name.replace(/^public\./, '');
+}
+
+function shortId(id: string | null | undefined): string {
+  if (!id) return '—';
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+function auditActionClass(action: AuditLogAction): string {
+  if (action === 'INSERT') return 'text-emerald-700 font-semibold';
+  if (action === 'DELETE') return 'text-rose-700 font-semibold';
+  return 'text-amber-700 font-semibold';
+}
+
+function formatAuditJson(data: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+function toggleAuditDetail(id: string) {
+  const next = new Set(expandedAuditIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedAuditIds.value = next;
+}
+
+async function loadAuditLogs(reset: boolean) {
+  if (reset) {
+    auditOffset.value = 0;
+    auditLogs.value = [];
+    expandedAuditIds.value = new Set();
+  }
+
+  loadingAudit.value = true;
+  auditError.value = '';
+  try {
+    const res = await access.adminListAuditLogs({
+      limit: auditPageSize,
+      offset: auditOffset.value,
+      tableFilter: auditTableFilter.value,
+      actionFilter: auditActionFilter.value
+    });
+    if (!res.ok) {
+      auditError.value =
+        res.error ??
+        'No se pudo cargar auditoría. Ejecuta scripts/fix-admin-audit-logs.sql en Supabase.';
+      if (reset) auditLogs.value = [];
+      return;
+    }
+    auditTotal.value = res.total;
+    if (reset) {
+      auditLogs.value = res.logs;
+    } else {
+      auditLogs.value = [...auditLogs.value, ...res.logs];
+    }
+    auditOffset.value = auditLogs.value.length;
+    auditLoadedOnce.value = true;
+  } finally {
+    loadingAudit.value = false;
+  }
+}
+
+function switchToAuditTab() {
+  activeTab.value = 'audit';
+  if (!auditLoadedOnce.value) {
+    void loadAuditLogs(true);
+  }
 }
 
 async function loadUsers() {

@@ -31,6 +31,22 @@ export interface AccessCodeRow {
   created_at: string;
 }
 
+export type AuditLogAction = 'INSERT' | 'UPDATE' | 'DELETE';
+
+export interface AuditLogRow {
+  id: string;
+  created_at: string;
+  action: AuditLogAction;
+  table_name: string;
+  record_id: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  subject_user_id: string | null;
+  subject_email: string | null;
+  old_data: Record<string, unknown> | null;
+  new_data: Record<string, unknown> | null;
+}
+
 interface AccessState {
   ready: boolean;
   loading: boolean;
@@ -191,6 +207,37 @@ export const useAccessStore = defineStore('access', {
         return { ok: false, codes: [], error: row?.error ?? 'No autorizado.' };
       }
       return { ok: true, codes: row.codes ?? [] };
+    },
+    async adminListAuditLogs(options?: {
+      limit?: number;
+      offset?: number;
+      tableFilter?: string;
+      actionFilter?: AuditLogAction | '';
+    }): Promise<{
+      ok: boolean;
+      logs: AuditLogRow[];
+      total: number;
+      error?: string;
+    }> {
+      const { data, error } = await supabase.rpc('admin_list_audit_logs', {
+        p_limit: options?.limit ?? 50,
+        p_offset: options?.offset ?? 0,
+        p_table_filter: options?.tableFilter?.trim() || null,
+        p_action_filter: options?.actionFilter?.trim() || null
+      });
+      if (error) {
+        return { ok: false, logs: [], total: 0, error: error.message };
+      }
+      const row = data as {
+        ok?: boolean;
+        logs?: AuditLogRow[];
+        total?: number;
+        error?: string;
+      } | null;
+      if (!row?.ok) {
+        return { ok: false, logs: [], total: 0, error: row?.error ?? 'No autorizado.' };
+      }
+      return { ok: true, logs: row.logs ?? [], total: row.total ?? 0 };
     }
   }
 });

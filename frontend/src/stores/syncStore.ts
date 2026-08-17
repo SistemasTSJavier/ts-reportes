@@ -10,6 +10,11 @@ import {
 } from '../utils/supabaseAuthErrors';
 import { uploadSensitiveEvidence } from '../services/evidenceStorage';
 import { validateRegistroPayload } from '../utils/registroValidation';
+import {
+  computeOfflinePackageIntegrityHash,
+  OFFLINE_INTEGRITY_VERSION,
+  verifyOfflinePackageIntegrity
+} from '../utils/offlinePackageIntegrity';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -33,6 +38,9 @@ interface SyncItem {
   status: 'pending' | 'processing' | 'done' | 'error';
   lastError?: string;
   updatedAt: string;
+  /** SHA-256 del insertPayloadBase al encolar (integridad offline). */
+  integrityHash?: string;
+  integrityVersion?: number;
 }
 
 interface SyncState {
@@ -512,6 +520,9 @@ export const useSyncStore = defineStore('sync', {
         ...payload,
         insertPayloadBase: validateRegistroPayload(payload.insertPayloadBase)
       };
+      const integrityHash = await computeOfflinePackageIntegrityHash(
+        safePayload.insertPayloadBase as Record<string, unknown>
+      );
       const now = new Date().toISOString();
       const fp = offlineCreateFingerprint(safePayload.insertPayloadBase as Record<string, unknown>);
       const dup = this.queue.find(
@@ -524,6 +535,8 @@ export const useSyncStore = defineStore('sync', {
       );
       if (dup) {
         dup.payload = safePayload;
+        dup.integrityHash = integrityHash;
+        dup.integrityVersion = OFFLINE_INTEGRITY_VERSION;
         dup.lastError = undefined;
         dup.updatedAt = now;
         await this.persist();
@@ -535,7 +548,9 @@ export const useSyncStore = defineStore('sync', {
         kind: 'create_registro_and_generate',
         payload: safePayload,
         status: 'pending',
-        updatedAt: now
+        updatedAt: now,
+        integrityHash,
+        integrityVersion: OFFLINE_INTEGRITY_VERSION
       };
       this.queue.push(item);
       await this.persist();
@@ -677,6 +692,20 @@ export const useSyncStore = defineStore('sync', {
               hadSuccess = true;
             } else if (item.kind === 'create_registro_and_generate') {
               const payload = item.payload as CreateRegistroAndGeneratePayload;
+
+              if (item.integrityHash) {
+                const payloadForHash = validateRegistroPayload(payload.insertPayloadBase);
+                const ok = await verifyOfflinePackageIntegrity(
+                  payloadForHash as Record<string, unknown>,
+                  item.integrityHash
+                );
+                if (!ok) {
+                  throw new Error(
+                    'Integridad del paquete offline comprometida (SHA-256). Revisa la cola o vuelve a capturar el registro.'
+                  );
+                }
+              }
+
               const organizationId =
                 (session?.user?.app_metadata?.org_id as string | undefined)?.trim() ||
                 payload.userId;

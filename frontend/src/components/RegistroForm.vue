@@ -574,6 +574,11 @@ import { useToastStore } from '../stores/toastStore';
 import { useSyncStore } from '../stores/syncStore';
 import { uploadSensitiveEvidence } from '../services/evidenceStorage';
 import { validateRegistroPayload } from '../utils/registroValidation';
+import {
+  drawEvidenceWatermark,
+  getEvidenceCaptureGeo,
+  type EvidenceCaptureMeta
+} from '../utils/evidenceWatermark';
 import ImagePicker from './ImagePicker.vue';
 
 interface RegistroFormModel {
@@ -901,7 +906,10 @@ function getJpegExifOrientation(buffer: ArrayBuffer): number {
 async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
   dataUrl: string;
   orientation: number;
+  captureMeta: EvidenceCaptureMeta;
 }> {
+  const capturedAt = new Date().toISOString();
+  const geoPromise = getEvidenceCaptureGeo();
   const buffer = await file.arrayBuffer();
   const orientation = getJpegExifOrientation(buffer);
 
@@ -1037,6 +1045,22 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
 
     const normalizedCanvas = trimBlackBorders(canvas);
 
+    const geo = await geoPromise;
+    const captureMeta: EvidenceCaptureMeta = {
+      capturedAt,
+      latitude: geo?.latitude,
+      longitude: geo?.longitude,
+      gpsAccuracy: geo?.accuracy
+    };
+
+    const watermarkedCanvas = document.createElement('canvas');
+    watermarkedCanvas.width = normalizedCanvas.width;
+    watermarkedCanvas.height = normalizedCanvas.height;
+    const wctx = watermarkedCanvas.getContext('2d');
+    if (!wctx) throw new Error('No se pudo crear canvas para watermark');
+    wctx.drawImage(normalizedCanvas, 0, 0);
+    drawEvidenceWatermark(wctx, watermarkedCanvas.width, watermarkedCanvas.height, captureMeta);
+
     // Compresión: JPEG con tope de peso por imagen.
     // Estrategia: bajar calidad y, si aún pesa mucho, reducir resolución en pasos.
     const maxBytes = 280 * 1024; // objetivo ~280KB por evidencia
@@ -1044,7 +1068,7 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
 
     const encodeJpeg = (c: HTMLCanvasElement, q: number) => c.toDataURL('image/jpeg', q);
 
-    let workingCanvas = normalizedCanvas;
+    let workingCanvas = watermarkedCanvas;
     let dataUrl = encodeJpeg(workingCanvas, 0.8);
 
     for (const quality of [0.8, 0.72, 0.64, 0.56, 0.48]) {
@@ -1069,7 +1093,7 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
       }
     }
 
-    return { dataUrl, orientation };
+    return { dataUrl, orientation, captureMeta };
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
@@ -1084,14 +1108,18 @@ async function onPickImage(
   const file = target.files?.[0];
   if (!file) return;
 
-  const { dataUrl, orientation } = await fileToOrientedCompressedJpegDataUrl(file);
+  const { dataUrl, orientation, captureMeta } = await fileToOrientedCompressedJpegDataUrl(file);
 
   // @ts-expect-error dynamic
   form[field] = dataUrl;
   form.exifPorEvidencia[exifKey] = {
     filename: file.name,
     size: file.size,
-    orientation
+    orientation,
+    capturedAt: captureMeta.capturedAt,
+    latitude: captureMeta.latitude,
+    longitude: captureMeta.longitude,
+    gpsAccuracy: captureMeta.gpsAccuracy
   };
 }
 
