@@ -42,15 +42,7 @@
               </button>
             </template>
             <template v-else>
-              <button
-                type="button"
-                class="btn-primary py-2 px-4 text-sm"
-                :disabled="auth.loading"
-                @click="auth.signInWithGoogle"
-              >
-                <span v-if="auth.loading" class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                <span v-else>Iniciar con Google</span>
-              </button>
+              <span class="text-xs text-slate-500 hidden sm:inline">Verifica el acceso para entrar</span>
             </template>
           </div>
         </div>
@@ -61,7 +53,11 @@
       class="flex-1 w-full mx-auto px-4 sm:px-6 py-6 sm:py-8"
       :class="isAdminRoute ? 'max-w-5xl' : 'max-w-4xl'"
     >
-      <router-view />
+      <div v-if="auth.loading && !auth.isSignedIn" class="text-center text-sm text-slate-500 py-16">
+        Cargando…
+      </div>
+      <TurnstileGate v-else-if="showTurnstileGate" />
+      <router-view v-else />
     </main>
 
     <footer class="border-t border-slate-200 bg-white">
@@ -90,6 +86,7 @@ import { useAuthStore } from './stores/authStore';
 import { usePwaStore } from './stores/pwaStore';
 import { useSyncStore } from './stores/syncStore';
 import ToastContainer from './components/ToastContainer.vue';
+import TurnstileGate from './components/TurnstileGate.vue';
 import { supabase } from './supabaseClient';
 
 const auth = useAuthStore();
@@ -98,6 +95,10 @@ const sync = useSyncStore();
 const pwa = usePwaStore();
 const route = useRoute();
 const isAdminRoute = computed(() => route.name === 'admin');
+const PUBLIC_ROUTE_NAMES = new Set(['privacy', 'terms', 'security-support']);
+const showTurnstileGate = computed(
+  () => !auth.loading && !auth.isSignedIn && typeof route.name === 'string' && !PUBLIC_ROUTE_NAMES.has(route.name)
+);
 
 let authSubscription: { unsubscribe: () => void } | null = null;
 /** Renueva JWT antes de que caduque si el usuario deja la pestaña abierta (cola vacía no llama a processQueue). */

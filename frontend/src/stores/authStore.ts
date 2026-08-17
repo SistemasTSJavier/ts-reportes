@@ -5,6 +5,7 @@ import { SESSION_EXPIRED } from '../utils/supabaseAuthErrors';
 import { normalizeServiceLogoToPng } from '../utils/normalizeServiceLogoUpload';
 import { useAccessStore } from './accessStore';
 import { useToastStore } from './toastStore';
+import { useTurnstileStore } from './turnstileStore';
 const LOGO_BUCKET = ((import.meta.env.VITE_LOGO_BUCKET as string | undefined)?.trim() || 'ctpat-logs');
 
 interface AuthState {
@@ -499,6 +500,7 @@ export const useAuthStore = defineStore('auth', {
       this.onedriveSubfolderLocked = false;
     },
     async signInWithGoogle() {
+      useTurnstileStore().assertPassed();
       this.loading = true;
       // Usar el origen real de la pestaña evita errores OAuth 400 cuando VITE_SITE_URL
       // quedó apuntando a localhost en un despliegue remoto.

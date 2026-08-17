@@ -1157,8 +1157,9 @@ async function buildPdf(
   });
 
   // 1) Logos arriba (misma disposición: izquierda, centro, derecha)
-  const logoWidth = 62;
-  const logoHeight = 36;
+  // +15% respecto al tamaño base 62×36
+  const logoWidth = 71;
+  const logoHeight = 41;
   const logosGapFromTop = 12;
   const logosY = cursorY - logosGapFromTop - logoHeight / 2;
   const leftX = 32 + 10;

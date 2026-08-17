@@ -53,6 +53,7 @@ jobs:
         run: |
           supabase functions deploy generate-ctpat-pdf --project-ref ${{ env.SUPABASE_PROJECT_REF }} --use-api --yes
           supabase functions deploy purge-expired-ctpat-data --project-ref ${{ env.SUPABASE_PROJECT_REF }} --use-api --yes
+          supabase functions deploy verify-turnstile --project-ref ${{ env.SUPABASE_PROJECT_REF }} --use-api --yes
 
   # Vercel: conectar el repo en vercel.com para deploy automático del frontend.
   # Variables VITE_* en Vercel → Settings → Environment Variables (ver frontend/.env.example).
