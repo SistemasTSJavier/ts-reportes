@@ -67,31 +67,11 @@
       </div>
 
       <!-- Licencia (Imagen) -->
-      <div class="space-y-2">
-        <label class="font-semibold text-slate-700">Licencia (imagen)</label>
-        <div
-          class="border border-dashed border-slate-300 rounded-md h-40 flex items-center justify-center bg-slate-50 relative overflow-hidden"
-        >
-          <div v-if="!form.licenciaImagen" class="flex flex-col items-center gap-1 text-slate-500 text-center px-2">
-            <span class="text-2xl">📷</span>
-            <span>Toque para tomar foto de licencia</span>
-            <span class="text-[10px] text-slate-400">Cámara en tiempo real</span>
-          </div>
-          <img
-            v-else
-            :src="form.licenciaImagen"
-            alt="Licencia"
-            class="w-full h-full object-contain"
-          />
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            class="absolute inset-0 opacity-0 cursor-pointer"
-            @change="onPickImage('licenciaImagen', $event, 'licencia')"
-          />
-        </div>
-      </div>
+      <ImagePicker
+        label="Licencia (imagen)"
+        :image="form.licenciaImagen"
+        @capture="onPickImageFile('licenciaImagen', $event, 'licencia')"
+      />
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div class="space-y-1">
@@ -469,27 +449,27 @@
         <ImagePicker
           label="Evidencia Frontal"
           :image="form.evidenciaFrontal"
-          @pick="onPickImage('evidenciaFrontal', $event, 'frontal')"
+          @capture="onPickImageFile('evidenciaFrontal', $event, 'frontal')"
         />
         <ImagePicker
           label="Evidencia Lateral 1"
           :image="form.evidenciaLateral1"
-          @pick="onPickImage('evidenciaLateral1', $event, 'lateral1')"
+          @capture="onPickImageFile('evidenciaLateral1', $event, 'lateral1')"
         />
         <ImagePicker
           label="Evidencia Lateral 2"
           :image="form.evidenciaLateral2"
-          @pick="onPickImage('evidenciaLateral2', $event, 'lateral2')"
+          @capture="onPickImageFile('evidenciaLateral2', $event, 'lateral2')"
         />
         <ImagePicker
           label="Puertas Traseras"
           :image="form.puertasTraseras"
-          @pick="onPickImage('puertasTraseras', $event, 'puertas_traseras')"
+          @capture="onPickImageFile('puertasTraseras', $event, 'puertas_traseras')"
         />
         <ImagePicker
           label="EVIDENCIA DE CAJA ABIERTA O SELLO"
           :image="form.evidenciaCajaAbierta"
-          @pick="onPickImage('evidenciaCajaAbierta', $event, 'caja_abierta')"
+          @capture="onPickImageFile('evidenciaCajaAbierta', $event, 'caja_abierta')"
         />
       </div>
     </section>
@@ -1103,28 +1083,32 @@ async function fileToOrientedCompressedJpegDataUrl(file: File): Promise<{
   }
 }
 
-async function onPickImage(
+async function onPickImageFile(
   field: keyof RegistroFormModel,
-  event: Event,
+  file: File,
   exifKey: string
 ) {
-  const target = event.target as HTMLInputElement;
-  const file = target.files?.[0];
-  if (!file) return;
+  try {
+    const { dataUrl, orientation, captureMeta } = await fileToOrientedCompressedJpegDataUrl(file);
 
-  const { dataUrl, orientation, captureMeta } = await fileToOrientedCompressedJpegDataUrl(file);
-
-  // @ts-expect-error dynamic
-  form[field] = dataUrl;
-  form.exifPorEvidencia[exifKey] = {
-    filename: file.name,
-    size: file.size,
-    orientation,
-    capturedAt: captureMeta.capturedAt,
-    latitude: captureMeta.latitude,
-    longitude: captureMeta.longitude,
-    gpsAccuracy: captureMeta.gpsAccuracy
-  };
+    // @ts-expect-error dynamic
+    form[field] = dataUrl;
+    form.exifPorEvidencia[exifKey] = {
+      filename: file.name,
+      size: file.size,
+      orientation,
+      capturedAt: captureMeta.capturedAt,
+      latitude: captureMeta.latitude,
+      longitude: captureMeta.longitude,
+      gpsAccuracy: captureMeta.gpsAccuracy,
+      source: 'live_camera'
+    };
+  } catch (e) {
+    toastStore.error(
+      'Foto',
+      e instanceof Error ? e.message : 'No se pudo procesar la foto en tiempo real.'
+    );
+  }
 }
 
 function hasCriticalFailing(): boolean {
