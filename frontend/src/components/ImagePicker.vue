@@ -4,9 +4,10 @@
     <div
       class="border border-dashed border-slate-300 rounded-md h-40 flex items-center justify-center bg-slate-50 relative overflow-hidden"
     >
-      <div v-if="!image" class="flex flex-col items-center gap-1 text-slate-500">
+      <div v-if="!image" class="flex flex-col items-center gap-1 text-slate-500 text-center px-2">
         <span class="text-2xl">📷</span>
-        <span>Toque para capturar</span>
+        <span>Toque para tomar foto</span>
+        <span class="text-[10px] text-slate-400">Cámara en tiempo real</span>
       </div>
       <img v-else :src="image" :alt="label" class="w-full h-full object-contain" />
       <input

@@ -82,3 +82,5 @@ revoke all on function public.admin_list_audit_logs(integer, integer, text, text
 grant execute on function public.admin_list_audit_logs(integer, integer, text, text) to authenticated;
 
 commit;
+
+notify pgrst, 'reload schema';

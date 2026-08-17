@@ -37,6 +37,13 @@ let refreshSessionForApiMutex: Promise<Session | null> | null = null;
 /** Evita varios inserts concurrentes en `user_drive_config` (misma clave → 23505 y error en consola). */
 let ensureDriveConfigMutex: Promise<void> | null = null;
 
+/** Una sola inicialización de sesión compartida (router + App.vue). */
+let sessionBootstrapPromise: Promise<void> | null = null;
+
+function resetSessionBootstrap() {
+  sessionBootstrapPromise = null;
+}
+
 function isPostgresUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string; message?: string } | null;
   if (e?.code === '23505') return true;
@@ -375,6 +382,16 @@ export const useAuthStore = defineStore('auth', {
         this.scheduleDriveConfigRetry();
       }
     },
+    async waitForSession(): Promise<void> {
+      if (!sessionBootstrapPromise) {
+        sessionBootstrapPromise = this.initSession();
+      }
+      await sessionBootstrapPromise;
+    },
+    async rebootstrapSession(): Promise<void> {
+      resetSessionBootstrap();
+      await this.waitForSession();
+    },
     async initSession() {
       this.loading = true;
       this.driveConfigReady = false;
@@ -533,6 +550,7 @@ export const useAuthStore = defineStore('auth', {
     },
     async signOut() {
       await supabase.auth.signOut();
+      resetSessionBootstrap();
       this.isSignedIn = false;
       this.userId = null;
       this.email = null;

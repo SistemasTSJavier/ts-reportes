@@ -23,7 +23,7 @@
               <router-link
                 v-if="access.isAdmin"
                 to="/panel-admin"
-                class="hidden sm:inline text-xs font-semibold text-tactical-blue hover:underline"
+                class="text-xs font-semibold text-tactical-blue hover:underline"
               >
                 Panel admin
               </router-link>
@@ -133,7 +133,7 @@ function onVisibilityChange() {
 
 onMounted(() => {
   pwa.init();
-  void auth.initSession();
+  void auth.waitForSession();
 
   watch(
     () => auth.isSignedIn,
@@ -152,7 +152,7 @@ onMounted(() => {
 
   const { data } = supabase.auth.onAuthStateChange((event) => {
     if (event === 'SIGNED_IN') {
-      void auth.initSession();
+      void auth.rebootstrapSession();
     }
   });
   authSubscription = data.subscription;

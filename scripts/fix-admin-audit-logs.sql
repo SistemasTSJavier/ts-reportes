@@ -86,3 +86,6 @@ revoke all on function public.admin_list_audit_logs(integer, integer, text, text
 grant execute on function public.admin_list_audit_logs(integer, integer, text, text) to authenticated;
 
 commit;
+
+-- Refresca el schema cache de PostgREST (evita error "not found in schema cache")
+notify pgrst, 'reload schema';

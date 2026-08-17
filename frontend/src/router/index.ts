@@ -96,6 +96,8 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (typeof name === 'string' && APP_ROUTE_NAMES.has(name)) {
+    await auth.waitForSession();
+
     if (!auth.isSignedIn) {
       if (name === 'home') {
         next();
@@ -110,8 +112,16 @@ router.beforeEach(async (to, _from, next) => {
     }
 
     if (name === 'admin') {
+      await access.syncContext();
       if (!access.isAdmin) {
+        const toast = useToastStore();
         next({ name: 'home', replace: true });
+        window.setTimeout(() => {
+          toast.error(
+            'Acceso denegado',
+            'Tu cuenta no tiene permisos de administrador. Si acabas de ser dado de alta como admin, cierra sesión y vuelve a entrar.'
+          );
+        }, 150);
         return;
       }
     } else if (name === 'activacion') {
@@ -141,7 +151,7 @@ router.beforeEach(async (to, _from, next) => {
       window.setTimeout(() => {
         toast.info(
           'Cámara no disponible',
-          'Este entorno no permite usar la cámara (por ejemplo sitio sin HTTPS). Si el navegador lo permite, podrás elegir fotos desde la galería en el formulario.'
+          'Este entorno no permite usar la cámara (por ejemplo sitio sin HTTPS). Las evidencias requieren foto en tiempo real.'
         );
       }, 150);
     }

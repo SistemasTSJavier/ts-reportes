@@ -72,9 +72,10 @@
         <div
           class="border border-dashed border-slate-300 rounded-md h-40 flex items-center justify-center bg-slate-50 relative overflow-hidden"
         >
-          <div v-if="!form.licenciaImagen" class="flex flex-col items-center gap-1 text-slate-500">
+          <div v-if="!form.licenciaImagen" class="flex flex-col items-center gap-1 text-slate-500 text-center px-2">
             <span class="text-2xl">📷</span>
-            <span>Toque para capturar licencia</span>
+            <span>Toque para tomar foto de licencia</span>
+            <span class="text-[10px] text-slate-400">Cámara en tiempo real</span>
           </div>
           <img
             v-else
@@ -461,6 +462,9 @@
     <!-- 9. Evidencias fotográficas -->
     <section class="card-section">
       <h3 class="card-section-title"><span class="card-section-title-accent" /> Evidencias fotográficas</h3>
+      <p class="text-[11px] text-slate-500 mb-3">
+        Tome cada evidencia en tiempo real con la cámara del dispositivo. No se admite subir fotos desde galería.
+      </p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ImagePicker
           label="Evidencia Frontal"
