@@ -1,15 +1,22 @@
 import { defineStore } from 'pinia';
 
 const PASSED_KEY = 'ts_ctpat_turnstile_ok_v1';
-const PASSED_TTL_MS = 30 * 60 * 1000;
+const PASSED_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 export type TurnstileStatus = 'idle' | 'widget' | 'verifying' | 'passed' | 'failed';
 
 function readPassedUntil(): number {
   try {
-    const raw = sessionStorage.getItem(PASSED_KEY);
+    const raw = localStorage.getItem(PASSED_KEY) ?? sessionStorage.getItem(PASSED_KEY);
     const n = raw ? Number(raw) : 0;
-    return Number.isFinite(n) ? n : 0;
+    if (Number.isFinite(n) && n > 0) {
+      if (localStorage.getItem(PASSED_KEY) == null) {
+        writePassedUntil(n);
+        sessionStorage.removeItem(PASSED_KEY);
+      }
+      return n;
+    }
+    return 0;
   } catch {
     return 0;
   }
@@ -17,7 +24,8 @@ function readPassedUntil(): number {
 
 function writePassedUntil(until: number): void {
   try {
-    sessionStorage.setItem(PASSED_KEY, String(until));
+    localStorage.setItem(PASSED_KEY, String(until));
+    sessionStorage.removeItem(PASSED_KEY);
   } catch {
     /* ignore */
   }
@@ -25,6 +33,7 @@ function writePassedUntil(until: number): void {
 
 function clearPassed(): void {
   try {
+    localStorage.removeItem(PASSED_KEY);
     sessionStorage.removeItem(PASSED_KEY);
   } catch {
     /* ignore */

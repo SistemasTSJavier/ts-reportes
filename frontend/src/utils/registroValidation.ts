@@ -51,6 +51,7 @@ export const registroPayloadSchema = z.object({
   comentarios_tipo: z.enum(['Sin comentarios', 'Rechazado', 'Texto libre']),
   comentarios: sanitizedString({ max: 4000 }),
   evidencias_exif: z.record(z.string(), z.unknown()),
+  client_request_id: z.string().uuid().optional().nullable(),
   user_id: z.string().uuid(),
   organization_id: sanitizedString({ min: 1, max: 120 })
 });

@@ -158,7 +158,7 @@ onMounted(() => {
   authSubscription = data.subscription;
 
   void (async () => {
-    await sync.loadFromStorage();
+    await auth.waitForSession();
     sync.attachOnlineListener();
     sync.attachLifecycleListeners();
     sync.attachPeriodicSync(45000);

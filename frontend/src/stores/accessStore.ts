@@ -13,6 +13,7 @@ export interface AccessUserRow {
 }
 
 export interface AdminUserOverviewRow extends AccessUserRow {
+  access_expires_at: string | null;
   registros_count: number;
   service_logo_file: string | null;
   onedrive_subfolder_name: string | null;
@@ -133,11 +134,13 @@ export const useAccessStore = defineStore('access', {
     },
     async adminSetUserAccess(
       userId: string,
-      status: UserAccessStatus
+      status: UserAccessStatus,
+      accessExpiresAt?: string | null
     ): Promise<{ ok: boolean; error?: string }> {
       const { data, error } = await supabase.rpc('admin_set_user_access', {
         p_user_id: userId,
-        p_status: status
+        p_status: status,
+        p_access_expires_at: accessExpiresAt ?? null
       });
       if (error) {
         return { ok: false, error: error.message };
@@ -207,6 +210,42 @@ export const useAccessStore = defineStore('access', {
         return { ok: false, codes: [], error: row?.error ?? 'No autorizado.' };
       }
       return { ok: true, codes: row.codes ?? [] };
+    },
+    async adminGrantTemporaryAccess(
+      userId: string,
+      days: number
+    ): Promise<{ ok: boolean; error?: string; accessExpiresAt?: string | null }> {
+      const { data, error } = await supabase.rpc('admin_grant_temporary_access', {
+        p_user_id: userId,
+        p_days: days
+      });
+      if (error) {
+        return { ok: false, error: error.message };
+      }
+      const row = data as {
+        ok?: boolean;
+        error?: string;
+        access_expires_at?: string | null;
+      } | null;
+      if (!row?.ok) {
+        return { ok: false, error: row?.error ?? 'No se pudo otorgar acceso temporal.' };
+      }
+      return { ok: true, accessExpiresAt: row.access_expires_at ?? null };
+    },
+    async adminPrepareUserDelete(
+      userId: string
+    ): Promise<{ ok: boolean; error?: string; message?: string }> {
+      const { data, error } = await supabase.rpc('admin_prepare_user_delete', {
+        p_user_id: userId
+      });
+      if (error) {
+        return { ok: false, error: error.message };
+      }
+      const row = data as { ok?: boolean; error?: string; message?: string } | null;
+      if (!row?.ok) {
+        return { ok: false, error: row?.error ?? 'No se pudo preparar el borrado.' };
+      }
+      return { ok: true, message: row.message ?? 'Datos eliminados.' };
     },
     async adminListAuditLogs(options?: {
       limit?: number;

@@ -101,6 +101,9 @@
                   <span v-if="u.onedrive_subfolder_locked" class="text-amber-700"> · bloqueada</span>
                   <span v-if="u.logo_locked" class="text-amber-700"> · logo bloqueado</span>
                 </p>
+                <p v-if="u.access_expires_at" class="text-xs text-indigo-700 mt-0.5">
+                  Acceso temporal hasta {{ formatDate(u.access_expires_at) }}
+                </p>
               </div>
             </div>
 
@@ -133,6 +136,40 @@
                 Pendiente
               </button>
             </div>
+          </div>
+
+          <div class="rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-3 space-y-2">
+            <p class="text-xs font-semibold text-indigo-900">Acceso temporal / eliminar</p>
+            <div class="flex flex-wrap gap-2 items-center">
+              <select
+                v-model="tempAccessDays[u.user_id]"
+                class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              >
+                <option :value="7">7 días</option>
+                <option :value="30">30 días</option>
+                <option :value="90">90 días</option>
+                <option :value="180">180 días</option>
+              </select>
+              <button
+                type="button"
+                class="btn-secondary py-1.5 px-3 text-xs"
+                :disabled="actingUserId === u.user_id"
+                @click="grantTemporaryAccess(u.user_id)"
+              >
+                Acceso temporal
+              </button>
+              <button
+                type="button"
+                class="text-xs text-rose-700 font-semibold hover:underline"
+                :disabled="actingUserId === u.user_id"
+                @click="deleteUserData(u.user_id, u.email || u.user_id)"
+              >
+                Eliminar datos
+              </button>
+            </div>
+            <p class="text-[10px] text-indigo-800/80">
+              «Eliminar datos» borra registros, storage y acceso. Luego elimina al usuario en Supabase → Authentication.
+            </p>
           </div>
 
           <div class="rounded-md border border-slate-200 bg-slate-50/80 px-3 py-3 space-y-2">
@@ -373,6 +410,7 @@ const codeLabel = ref('');
 const codeMaxUses = ref(1);
 const generatedCode = ref('');
 const folderDrafts = reactive<Record<string, string>>({});
+const tempAccessDays = reactive<Record<string, number>>({});
 
 type AdminTab = 'manage' | 'audit';
 const activeTab = ref<AdminTab>('manage');
@@ -506,6 +544,7 @@ async function loadUsers() {
     }
     users.value = legacy.users.map((u) => ({
       ...u,
+      access_expires_at: null,
       registros_count: 0,
       service_logo_file: null,
       onedrive_subfolder_name: null,
@@ -522,6 +561,9 @@ async function loadUsers() {
   users.value = res.users;
   for (const u of res.users) {
     folderDrafts[u.user_id] = u.onedrive_subfolder_name ?? '';
+    if (tempAccessDays[u.user_id] == null) {
+      tempAccessDays[u.user_id] = 30;
+    }
   }
 }
 
@@ -559,12 +601,57 @@ async function createCode() {
 async function setStatus(userId: string, status: UserAccessStatus) {
   actingUserId.value = userId;
   try {
-    const res = await access.adminSetUserAccess(userId, status);
+    const res = await access.adminSetUserAccess(userId, status, null);
     if (!res.ok) {
       toast.error('Error', res.error ?? 'No se pudo actualizar.');
       return;
     }
     toast.success('Actualizado', `Usuario marcado como ${statusLabel(status).toLowerCase()}.`);
+    await loadUsers();
+  } finally {
+    actingUserId.value = null;
+  }
+}
+
+async function grantTemporaryAccess(userId: string) {
+  actingUserId.value = userId;
+  try {
+    const days = tempAccessDays[userId] ?? 30;
+    const res = await access.adminGrantTemporaryAccess(userId, days);
+    if (!res.ok) {
+      toast.error('Acceso temporal', res.error ?? 'No se pudo otorgar.');
+      return;
+    }
+    toast.success(
+      'Acceso temporal',
+      res.accessExpiresAt
+        ? `Aprobado hasta ${formatDate(res.accessExpiresAt)}.`
+        : `Aprobado por ${days} días.`
+    );
+    await loadUsers();
+  } finally {
+    actingUserId.value = null;
+  }
+}
+
+async function deleteUserData(userId: string, label: string) {
+  const ok = window.confirm(
+    `¿Eliminar TODOS los datos de «${label}»?\n\nSe borran registros, logos, PDFs y acceso. Después debes eliminar al usuario en Supabase → Authentication.`
+  );
+  if (!ok) return;
+
+  actingUserId.value = userId;
+  try {
+    const res = await access.adminPrepareUserDelete(userId);
+    if (!res.ok) {
+      toast.error('Eliminar', res.error ?? 'No se pudo eliminar.');
+      return;
+    }
+    toast.success(
+      'Datos eliminados',
+      res.message ??
+        'Datos públicos y storage limpiados. Completa el borrado en Supabase → Authentication → Users.'
+    );
     await loadUsers();
   } finally {
     actingUserId.value = null;

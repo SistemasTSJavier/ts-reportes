@@ -51,6 +51,8 @@ interface SyncState {
   retryAttempt: number;
   retryTimerId: number | null;
   periodicSyncTimerId: number | null;
+  /** Usuario al que pertenece la cola local (evita mezclar dispositivos/cuentas). */
+  boundUserId: string | null;
 }
 
 export interface ProcessQueueResult {
@@ -66,18 +68,27 @@ function registroExpiresAtIso(): string {
   return new Date(Date.now() + REGISTRO_BD_RETENTION_MS).toISOString();
 }
 
-const STORAGE_KEY = 'ts_ctpat_sync_queue_v1';
-const HISTORY_KEY = 'ts_ctpat_sync_history_v1';
-/** Registro IDs cuyo PDF ya se generó/sincronizó con éxito en este dispositivo. */
-const COMPLETED_PDF_IDS_KEY = 'ts_ctpat_pdf_completed_ids_v1';
+const LEGACY_QUEUE_KEY = 'ts_ctpat_sync_queue_v1';
+const LEGACY_HISTORY_KEY = 'ts_ctpat_sync_history_v1';
+const LEGACY_COMPLETED_PDF_IDS_KEY = 'ts_ctpat_pdf_completed_ids_v1';
 const IDB_NAME = 'ts_ctpat_sync_db_v1';
 const IDB_STORE = 'kv';
 
 const MAX_COMPLETED_PDF_IDS = 400;
 
-function readCompletedPdfIds(): Set<string> {
+function userStorageKeys(userId: string) {
+  return {
+    queue: `ts_ctpat_sync_queue_v2_${userId}`,
+    history: `ts_ctpat_sync_history_v2_${userId}`,
+    completedPdfs: `ts_ctpat_pdf_completed_v2_${userId}`
+  };
+}
+
+function readCompletedPdfIds(userId: string | null): Set<string> {
+  if (!userId) return new Set();
+  const key = userStorageKeys(userId).completedPdfs;
   try {
-    const raw = localStorage.getItem(COMPLETED_PDF_IDS_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return new Set();
     const arr = JSON.parse(raw) as unknown;
     if (!Array.isArray(arr)) return new Set();
@@ -87,22 +98,34 @@ function readCompletedPdfIds(): Set<string> {
   }
 }
 
-function rememberCompletedPdfId(registroId: string): void {
+function rememberCompletedPdfId(userId: string | null, registroId: string): void {
   const id = registroId.trim();
-  if (!id) return;
-  const set = readCompletedPdfIds();
+  if (!id || !userId) return;
+  const key = userStorageKeys(userId).completedPdfs;
+  const set = readCompletedPdfIds(userId);
   set.add(id);
   const list = [...set];
   const trimmed = list.length > MAX_COMPLETED_PDF_IDS ? list.slice(-MAX_COMPLETED_PDF_IDS) : list;
   try {
-    localStorage.setItem(COMPLETED_PDF_IDS_KEY, JSON.stringify(trimmed));
+    localStorage.setItem(key, JSON.stringify(trimmed));
   } catch {
     /* ignore quota */
   }
 }
 
-function wasPdfCompletedLocally(registroId: string): boolean {
-  return readCompletedPdfIds().has(registroId.trim());
+function wasPdfCompletedLocally(userId: string | null, registroId: string): boolean {
+  return readCompletedPdfIds(userId).has(registroId.trim());
+}
+
+function registroLooksSyncedOnServer(row: {
+  sync_status?: string | null;
+  drive_file_id?: string | null;
+  pdf_storage_path?: string | null;
+} | null): boolean {
+  if (!row) return false;
+  if (row.drive_file_id || row.pdf_storage_path) return true;
+  const s = (row.sync_status ?? '').toString().trim().toLowerCase();
+  return s === 'synced';
 }
 
 /** IndexedDB no puede clonar Proxies (estado reactivo de Pinia/Vue). */
@@ -374,9 +397,145 @@ export const useSyncStore = defineStore('sync', {
     connectivity: navigator.onLine ? 'online' : 'offline',
     retryAttempt: 0,
     retryTimerId: null,
-    periodicSyncTimerId: null
+    periodicSyncTimerId: null,
+    boundUserId: null
   }),
   actions: {
+    resetForSignOut() {
+      this.boundUserId = null;
+      this.queue = [];
+      this.history = [];
+      this.clearRetryTimer();
+      this.retryAttempt = 0;
+    },
+    async bindUser(userId: string | null) {
+      if (!userId) {
+        this.resetForSignOut();
+        return;
+      }
+      const changed = this.boundUserId !== userId;
+      this.boundUserId = userId;
+      if (changed) {
+        await this.loadFromStorageForUser(userId);
+      }
+      await this.reconcileQueueWithServer(userId);
+    },
+    async reconcileQueueWithServer(userId: string) {
+      this.queue = this.queue.filter((q) => {
+        if (q.kind === 'create_registro_and_generate') {
+          return (q.payload as CreateRegistroAndGeneratePayload).userId === userId;
+        }
+        return true;
+      });
+
+      const createPending = this.queue.filter(
+        (q) =>
+          q.kind === 'create_registro_and_generate' &&
+          (q.status === 'pending' || q.status === 'processing' || q.status === 'error')
+      );
+      if (createPending.length === 0) {
+        await this.persist();
+        return;
+      }
+      if (!navigator.onLine) {
+        await this.persist();
+        return;
+      }
+
+      const now = new Date().toISOString();
+      for (const item of createPending) {
+        const base = (item.payload as CreateRegistroAndGeneratePayload).insertPayloadBase;
+        const crid = base?.client_request_id as string | undefined;
+        if (!crid) continue;
+
+        const { data: existing } = await supabase
+          .from('registros_ctpat')
+          .select('id, folio_pdf, sync_status, drive_file_id, pdf_storage_path')
+          .eq('user_id', userId)
+          .eq('client_request_id', crid)
+          .maybeSingle();
+
+        if (!existing?.id) continue;
+
+        const rid = existing.id as string;
+        if (registroLooksSyncedOnServer(existing)) {
+          item.status = 'done';
+          rememberCompletedPdfId(userId, rid);
+        } else {
+          item.kind = 'generate_pdf';
+          item.id = `pdf_${rid}`;
+          item.payload = {
+            registroId: rid,
+            folio: (existing.folio_pdf as string | null) ?? undefined
+          } satisfies GeneratePdfPayload;
+          item.status = 'pending';
+        }
+        item.lastError = undefined;
+        item.updatedAt = now;
+      }
+      await this.persist();
+    },
+    async loadFromStorageForUser(userId: string) {
+      const keys = userStorageKeys(userId);
+      try {
+        let queueFromDb = await idbGet<SyncItem[]>(keys.queue);
+        let historyFromDb = await idbGet<SyncItem[]>(keys.history);
+
+        if (!queueFromDb) {
+          const legacy = localStorage.getItem(LEGACY_QUEUE_KEY);
+          if (legacy) {
+            queueFromDb = normalizeQueueItems(JSON.parse(legacy));
+            await idbSet(keys.queue, cloneForIndexedDb(queueFromDb));
+            localStorage.removeItem(LEGACY_QUEUE_KEY);
+          }
+        }
+        if (!historyFromDb) {
+          const legacyH = localStorage.getItem(LEGACY_HISTORY_KEY);
+          if (legacyH) {
+            historyFromDb = JSON.parse(legacyH) as SyncItem[];
+            await idbSet(keys.history, cloneForIndexedDb(historyFromDb));
+            localStorage.removeItem(LEGACY_HISTORY_KEY);
+          }
+        }
+
+        this.queue = queueFromDb ? normalizeQueueItems(queueFromDb) : [];
+        this.history = historyFromDb && Array.isArray(historyFromDb) ? historyFromDb : [];
+
+        if (!queueFromDb) {
+          const raw = localStorage.getItem(keys.queue);
+          if (raw) {
+            this.queue = normalizeQueueItems(JSON.parse(raw));
+            await idbSet(keys.queue, cloneForIndexedDb(this.queue));
+          }
+        }
+        if (!historyFromDb) {
+          const rawHistory = localStorage.getItem(keys.history);
+          if (rawHistory) {
+            this.history = JSON.parse(rawHistory) as SyncItem[];
+            await idbSet(keys.history, cloneForIndexedDb(this.history));
+          }
+        }
+
+        const legacyCompleted = localStorage.getItem(LEGACY_COMPLETED_PDF_IDS_KEY);
+        if (legacyCompleted && !localStorage.getItem(keys.completedPdfs)) {
+          localStorage.setItem(keys.completedPdfs, legacyCompleted);
+          localStorage.removeItem(LEGACY_COMPLETED_PDF_IDS_KEY);
+        }
+
+        if (this.rescueStuckProcessingItems()) {
+          await this.persist();
+        }
+      } catch (e) {
+        console.warn('SyncStore: IndexedDB no disponible, usando localStorage', e);
+        const raw = localStorage.getItem(keys.queue);
+        const rawHistory = localStorage.getItem(keys.history);
+        this.queue = raw ? normalizeQueueItems(JSON.parse(raw)) : [];
+        this.history = rawHistory ? JSON.parse(rawHistory) : [];
+        if (this.rescueStuckProcessingItems()) {
+          await this.persist();
+        }
+      }
+    },
     clearRetryTimer() {
       if (this.retryTimerId != null) {
         window.clearTimeout(this.retryTimerId);
@@ -439,56 +598,23 @@ export const useSyncStore = defineStore('sync', {
       this.connectivity = 'online';
     },
     async loadFromStorage() {
-      try {
-        const queueFromDb = await idbGet<SyncItem[]>(STORAGE_KEY);
-        const historyFromDb = await idbGet<SyncItem[]>(HISTORY_KEY);
-
-        if (queueFromDb) {
-          this.queue = normalizeQueueItems(queueFromDb);
-        }
-        if (historyFromDb) {
-          this.history = Array.isArray(historyFromDb) ? historyFromDb : [];
-        }
-
-        if (!queueFromDb) {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) {
-            this.queue = normalizeQueueItems(JSON.parse(raw));
-            await idbSet(STORAGE_KEY, cloneForIndexedDb(this.queue));
-          }
-        }
-        if (!historyFromDb) {
-          const rawHistory = localStorage.getItem(HISTORY_KEY);
-          if (rawHistory) {
-            this.history = JSON.parse(rawHistory);
-            await idbSet(HISTORY_KEY, cloneForIndexedDb(this.history));
-          }
-        }
-        if (this.rescueStuckProcessingItems()) {
-          await this.persist();
-        }
-      } catch (e) {
-        console.warn('SyncStore: IndexedDB no disponible, usando localStorage', e);
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const rawHistory = localStorage.getItem(HISTORY_KEY);
-        this.queue = raw ? normalizeQueueItems(JSON.parse(raw)) : [];
-        this.history = rawHistory ? JSON.parse(rawHistory) : [];
-        if (this.rescueStuckProcessingItems()) {
-          await this.persist();
-        }
+      if (this.boundUserId) {
+        await this.loadFromStorageForUser(this.boundUserId);
       }
     },
     async persist() {
+      if (!this.boundUserId) return;
+      const keys = userStorageKeys(this.boundUserId);
       try {
         await Promise.all([
-          idbSet(STORAGE_KEY, cloneForIndexedDb(this.queue)),
-          idbSet(HISTORY_KEY, cloneForIndexedDb(this.history))
+          idbSet(keys.queue, cloneForIndexedDb(this.queue)),
+          idbSet(keys.history, cloneForIndexedDb(this.history))
         ]);
       } catch (e) {
         console.warn('SyncStore: error guardando en IndexedDB, usando localStorage', e);
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.queue));
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(this.history));
+      localStorage.setItem(keys.queue, JSON.stringify(this.queue));
+      localStorage.setItem(keys.history, JSON.stringify(this.history));
     },
     /**
      * JWT inválido (p. ej. usuario borrado en Supabase, refresh revocado): limpia cola local y cierra sesión.
@@ -516,9 +642,14 @@ export const useSyncStore = defineStore('sync', {
       return touched;
     },
     async enqueueCreateRegistroAndGenerate(payload: CreateRegistroAndGeneratePayload) {
+      const clientRequestId = crypto.randomUUID();
+      const insertPayloadBase = validateRegistroPayload({
+        ...(payload.insertPayloadBase as Record<string, unknown>),
+        client_request_id: clientRequestId
+      });
       const safePayload = {
         ...payload,
-        insertPayloadBase: validateRegistroPayload(payload.insertPayloadBase)
+        insertPayloadBase
       };
       const integrityHash = await computeOfflinePackageIntegrityHash(
         safePayload.insertPayloadBase as Record<string, unknown>
@@ -559,9 +690,22 @@ export const useSyncStore = defineStore('sync', {
       const registroId = (payload.registroId ?? '').toString().trim();
       if (!registroId) return;
 
-      // Ya sincronizado en este dispositivo → no volver a encolar al recargar.
-      if (wasPdfCompletedLocally(registroId)) {
+      const uid = this.boundUserId;
+
+      if (wasPdfCompletedLocally(uid, registroId)) {
         return;
+      }
+
+      if (navigator.onLine) {
+        const { data: existingReg } = await supabase
+          .from('registros_ctpat')
+          .select('sync_status, drive_file_id, pdf_storage_path')
+          .eq('id', registroId)
+          .maybeSingle();
+        if (registroLooksSyncedOnServer(existingReg)) {
+          rememberCompletedPdfId(uid, registroId);
+          return;
+        }
       }
 
       const now = new Date().toISOString();
@@ -576,7 +720,6 @@ export const useSyncStore = defineStore('sync', {
         return;
       }
 
-      // Si en el historial local ya quedó done, no regenerar.
       const doneBefore = this.history.some((h) => {
         if (h.status !== 'done') return false;
         if (h.id === id) return true;
@@ -585,7 +728,7 @@ export const useSyncStore = defineStore('sync', {
         return rid === registroId;
       });
       if (doneBefore) {
-        rememberCompletedPdfId(registroId);
+        rememberCompletedPdfId(uid, registroId);
         return;
       }
 
@@ -670,10 +813,11 @@ export const useSyncStore = defineStore('sync', {
               const alreadySynced =
                 status === 'synced' ||
                 Boolean(existingReg?.drive_file_id) ||
-                wasPdfCompletedLocally(rid);
+                Boolean(existingReg?.pdf_storage_path) ||
+                wasPdfCompletedLocally(this.boundUserId, rid);
 
               if (alreadySynced) {
-                rememberCompletedPdfId(rid);
+                rememberCompletedPdfId(this.boundUserId, rid);
                 item.status = 'done';
                 item.lastError = undefined;
                 item.updatedAt = new Date().toISOString();
@@ -684,7 +828,7 @@ export const useSyncStore = defineStore('sync', {
 
               await invokeGenerateCtpatPdf(rid);
 
-              rememberCompletedPdfId(rid);
+              rememberCompletedPdfId(this.boundUserId, rid);
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();
@@ -745,6 +889,44 @@ export const useSyncStore = defineStore('sync', {
                 });
               }
 
+              const crid = safeInsertPayloadBase.client_request_id as string | undefined;
+              if (crid) {
+                const { data: existingByClient } = await supabase
+                  .from('registros_ctpat')
+                  .select('id, folio_pdf, sync_status, drive_file_id, pdf_storage_path')
+                  .eq('user_id', payload.userId)
+                  .eq('client_request_id', crid)
+                  .maybeSingle();
+                if (existingByClient?.id) {
+                  const registroId = existingByClient.id as string;
+                  if (registroLooksSyncedOnServer(existingByClient)) {
+                    rememberCompletedPdfId(this.boundUserId, registroId);
+                    item.status = 'done';
+                    item.lastError = undefined;
+                    item.updatedAt = new Date().toISOString();
+                    this.history.unshift({ ...item });
+                    hadSuccess = true;
+                    continue;
+                  }
+                  item.kind = 'generate_pdf';
+                  item.id = `pdf_${registroId}`;
+                  item.payload = {
+                    registroId,
+                    folio: (existingByClient.folio_pdf as string | null) ?? undefined
+                  } satisfies GeneratePdfPayload;
+                  item.updatedAt = new Date().toISOString();
+                  await this.persist();
+                  await invokeGenerateCtpatPdf(registroId);
+                  rememberCompletedPdfId(this.boundUserId, registroId);
+                  item.status = 'done';
+                  item.lastError = undefined;
+                  item.updatedAt = new Date().toISOString();
+                  this.history.unshift({ ...item });
+                  hadSuccess = true;
+                  continue;
+                }
+              }
+
               const { data: folioData, error: folioErr } = await supabase.rpc('next_folio_ctpat', {
                 p_user_id: payload.userId
               });
@@ -799,7 +981,7 @@ export const useSyncStore = defineStore('sync', {
 
               await invokeGenerateCtpatPdf(registroId);
 
-              rememberCompletedPdfId(registroId);
+              rememberCompletedPdfId(this.boundUserId, registroId);
               item.status = 'done';
               item.lastError = undefined;
               item.updatedAt = new Date().toISOString();

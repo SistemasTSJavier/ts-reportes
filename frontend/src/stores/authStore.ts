@@ -6,6 +6,7 @@ import { normalizeServiceLogoToPng } from '../utils/normalizeServiceLogoUpload';
 import { useAccessStore } from './accessStore';
 import { useToastStore } from './toastStore';
 import { useTurnstileStore } from './turnstileStore';
+import { useSyncStore } from './syncStore';
 const LOGO_BUCKET = ((import.meta.env.VITE_LOGO_BUCKET as string | undefined)?.trim() || 'ctpat-logs');
 
 interface AuthState {
@@ -413,6 +414,7 @@ export const useAuthStore = defineStore('auth', {
           }
           const access = useAccessStore();
           await access.syncContext();
+          await useSyncStore().bindUser(this.userId);
           if (access.isApproved) {
             await this.ensureDriveConfigIfNeeded();
           }
@@ -439,6 +441,7 @@ export const useAuthStore = defineStore('auth', {
           this.onedriveSubfolderLocked = false;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           useAccessStore().reset();
+          useSyncStore().resetForSignOut();
         }
       } catch (e) {
         console.error('Error initSession:', e);
@@ -453,9 +456,11 @@ export const useAuthStore = defineStore('auth', {
           this.onedriveSubfolderLocked = false;
           localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
           useAccessStore().reset();
+          useSyncStore().resetForSignOut();
         } else {
           this.isSignedIn = !!this.userId;
           if (this.userId) {
+            await useSyncStore().bindUser(this.userId);
             this.scheduleDriveConfigRetry();
           }
         }
@@ -532,8 +537,7 @@ export const useAuthStore = defineStore('auth', {
             redirectTo,
             scopes: 'openid profile email https://www.googleapis.com/auth/drive.file',
             queryParams: {
-              access_type: 'offline',
-              prompt: 'consent'
+              access_type: 'offline'
             }
           }
         });
@@ -561,6 +565,7 @@ export const useAuthStore = defineStore('auth', {
       this.onedriveSubfolderLocked = false;
       localStorage.removeItem(AUTH_CACHED_USER_ID_KEY);
       useAccessStore().reset();
+      useSyncStore().resetForSignOut();
     },
     /**
      * Cierra sesión y avisa con un mensaje claro (sin códigos 401/JWT crudos).

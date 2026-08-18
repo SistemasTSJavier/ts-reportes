@@ -282,6 +282,7 @@ const registros = ref<Array<{
   created_at: string;
   sync_status: string | null;
   drive_file_id: string | null;
+  pdf_storage_path: string | null;
   checklist_tracto: Record<string, unknown> | null;
 }>>([]);
 const loadingRegistros = ref(false);
@@ -406,7 +407,7 @@ async function loadRegistros() {
   }
   const { data, error } = await supabase
     .from('registros_ctpat')
-    .select('id, folio_pdf, created_at, sync_status, drive_file_id, checklist_tracto')
+    .select('id, folio_pdf, created_at, sync_status, drive_file_id, pdf_storage_path, checklist_tracto')
     .eq('user_id', user.id)
     .order('created_at', { ascending: false });
 
@@ -422,8 +423,9 @@ async function loadRegistros() {
     // No reencola 'synced' ni 'error' en cada reload (evita regenerar el mismo PDF).
     const pendingDriveSync = (data ?? []).filter((r) => {
       if (!r?.id) return false;
-      if (r.drive_file_id) return false;
+      if (r.drive_file_id || r.pdf_storage_path) return false;
       const s = (r.sync_status ?? '').toString().trim().toLowerCase();
+      if (s === 'synced' || s === 'error') return false;
       return s === '' || s === 'pending';
     });
     for (const row of pendingDriveSync) {
