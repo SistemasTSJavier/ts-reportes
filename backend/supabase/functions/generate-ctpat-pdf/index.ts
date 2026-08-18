@@ -2676,11 +2676,9 @@ Deno.serve(async (req) => {
       return jsonError(origin, 403, 'Forbidden: registro pertenece a otra organización');
     }
 
-    // Idempotencia: no regenerar ni notificar OneDrive si el PDF ya existe.
-    const statusNorm = (row.sync_status ?? '').toString().trim().toLowerCase();
-    const hasDriveId = Boolean(row.drive_file_id && String(row.drive_file_id).trim());
+    // Si ESTE registro ya tiene PDF en Storage, no lo regeneramos, pero sí avisamos a OneDrive.
+    // No buscar TS-1.pdf en todo Google Drive: un PDF viejo bloquearía usuarios nuevos.
     const hasStoragePath = Boolean(row.pdf_storage_path && String(row.pdf_storage_path).trim());
-    const alreadySynced = statusNorm === 'synced' || hasDriveId || hasStoragePath;
 
     const rawFolioEarly = (row.folio_pdf ?? '').toString().trim();
     const mFileEarly = rawFolioEarly.match(/^TS-0*(\d+)$/i);
@@ -2689,39 +2687,34 @@ Deno.serve(async (req) => {
       folioNumEarly != null ? `TS-${folioNumEarly}` : rawFolioEarly || `TS-${row.id}`;
     const fileNameEarly = `${folioFileEarly}.pdf`;
 
-    if (!driveOnly) {
-      const existingDriveId =
-        (hasDriveId ? String(row.drive_file_id).trim() : null) ??
-        (await findDriveFileId(accessToken, fileNameEarly));
-      if (alreadySynced || existingDriveId) {
-        if (existingDriveId && !hasDriveId) {
-          await supabaseServer
-            .from('registros_ctpat')
-            .update({
-              sync_status: 'synced',
-              drive_file_id: existingDriveId
-            })
-            .eq('id', row.id)
-            .eq('user_id', row.user_id);
-        }
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            already: true,
-            driveSynced: true,
-            needsDriveSync: false,
-            driveFile: { id: existingDriveId ?? row.drive_file_id },
-            storagePath: row.pdf_storage_path
-          }),
-          {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/json',
-              ...corsHeaders(origin)
-            }
+    if (!driveOnly && hasStoragePath) {
+      const powerAutomate = await notifyPowerAutomateCtPatPdfReady({
+        supabaseServer,
+        fileName: fileNameEarly,
+        registroId: row.id,
+        organizationId: row.organization_id,
+        userId: row.user_id,
+        storagePath: String(row.pdf_storage_path).trim(),
+        driveFileId: row.drive_file_id
+      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          already: true,
+          driveSynced: Boolean(row.drive_file_id),
+          needsDriveSync: !row.drive_file_id,
+          driveFile: { id: row.drive_file_id },
+          storagePath: row.pdf_storage_path,
+          powerAutomate
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders(origin)
           }
-        );
-      }
+        }
+      );
     }
 
     const mergeEvidencias = (
@@ -2887,11 +2880,8 @@ Deno.serve(async (req) => {
       .eq('id', data.id)
       .eq('user_id', data.user_id);
 
-    let powerAutomate: PowerAutomateNotifyResult | 'skipped_storage_failed' | 'skipped_already_in_drive' =
-      'skipped_storage_failed';
-    if (reusedExisting) {
-      powerAutomate = 'skipped_already_in_drive';
-    } else if (storagePathSaved) {
+    let powerAutomate: PowerAutomateNotifyResult | 'skipped_storage_failed' = 'skipped_storage_failed';
+    if (storagePathSaved) {
       powerAutomate = await notifyPowerAutomateCtPatPdfReady({
         supabaseServer,
         fileName,
@@ -2912,6 +2902,7 @@ Deno.serve(async (req) => {
         driveSynced: true,
         needsDriveSync: false,
         driveFile: { id: driveItemId },
+        driveReused: reusedExisting,
         /** Diagnóstico: revisar en Red del navegador si OneDrive no recibe el archivo. */
         powerAutomate
       }),
