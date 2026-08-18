@@ -600,6 +600,25 @@ function sanitizeOnedriveSubfolderName(raw: string | null | undefined): string |
   return s;
 }
 
+function inferOnedriveClienteFolder(
+  configuredName: string | null,
+  serviceLogoFile: string | null | undefined
+): string | null {
+  const custom = sanitizeOnedriveSubfolderName(configuredName);
+  if (custom) return custom.toUpperCase();
+
+  const s = (serviceLogoFile ?? '').toString().toLowerCase();
+  if (!s) return null;
+  if (s.includes('danfoss')) return 'DANFOSS';
+  if (s.includes('bsh')) return 'BSH';
+  if (s.includes('caterpillar')) return 'CATERPILLAR';
+  if (s.includes('komatsu')) return 'KOMATSU';
+  if (s.includes('john_deere') || s.includes('johndeere') || s.includes('john-deere')) {
+    return 'JOHN_DEERE';
+  }
+  return null;
+}
+
 /**
  * Notifica a Power Automate (HTTP trigger) para copiar el PDF a OneDrive u otros destinos.
  * Los secrets se leen en cada llamada (no al importar el módulo) para que Supabase los aplique bien.
@@ -625,6 +644,8 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
 
   const webhookSecret = Deno.env.get('POWER_AUTOMATE_CTPAT_WEBHOOK_SECRET')?.trim() ?? '';
   const onedriveFolderShareUrl = Deno.env.get('POWER_AUTOMATE_CTPAT_ONEDRIVE_FOLDER_URL')?.trim() ?? '';
+  const onedriveRootFolder =
+    Deno.env.get('POWER_AUTOMATE_CTPAT_ONEDRIVE_ROOT')?.trim() || 'PDF-TACTICAL-SUPPORT';
 
   const { data: signed, error: signErr } = await params.supabaseServer.storage
     .from(PDF_STORAGE_BUCKET)
@@ -637,11 +658,14 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
 
   const { data: udcSub } = await params.supabaseServer
     .from('user_drive_config')
-    .select('onedrive_subfolder_name')
+    .select('onedrive_subfolder_name, service_logo_file')
     .eq('user_id', params.userId)
     .maybeSingle();
-  const customSub = sanitizeOnedriveSubfolderName(udcSub?.onedrive_subfolder_name ?? null);
-  const onedriveSubfolder = customSub ?? params.userId;
+
+  const onedriveSubfolder =
+    inferOnedriveClienteFolder(udcSub?.onedrive_subfolder_name ?? null, udcSub?.service_logo_file) ??
+    params.userId;
+  const onedriveRelativePath = `${onedriveRootFolder}/${onedriveSubfolder}/${params.fileName}`;
 
   const body = {
     event: 'ctpat_pdf_ready',
@@ -649,13 +673,23 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
     registroId: params.registroId,
     organizationId: params.organizationId,
     userId: params.userId,
-    /** Usar en Power Automate como segmento de carpeta (nombre legible); si no hay valor en BD = userId */
+    /** Carpeta cliente: DANFOSS / BSH / nombre configurado. No usar el UUID. */
     onedriveSubfolder,
+    cliente: onedriveSubfolder,
+    onedriveRootFolder,
+    onedriveRelativePath,
     storagePath: params.storagePath,
     pdfDownloadUrl: signed.signedUrl,
     driveFileId: params.driveFileId,
     onedriveFolderShareUrl: onedriveFolderShareUrl || null
   };
+
+  console.log('[generate-ctpat-pdf] Power Automate payload', {
+    registroId: params.registroId,
+    fileName: params.fileName,
+    onedriveSubfolder,
+    onedriveRelativePath
+  });
 
   const controller = new AbortController();
   const kill = setTimeout(() => controller.abort(), 15_000);
@@ -2601,6 +2635,7 @@ Deno.serve(async (req) => {
       driveOnly?: boolean;
       accessToken?: string;
     };
+
     const registroId = typeof body.registroId === 'string' ? body.registroId : null;
     const driveOnly = body.driveOnly === true;
     const accessToken = typeof body.accessToken === 'string' ? body.accessToken.trim() : '';

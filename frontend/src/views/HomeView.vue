@@ -59,9 +59,10 @@
           Carpeta en OneDrive (respaldo)
         </p>
         <p class="text-xs text-slate-500 mt-1 leading-snug">
-          Escribe un nombre para tu subcarpeta; Power Automate debe usar el campo
-          <code class="text-[11px] bg-white px-1 rounded border border-slate-200">onedriveSubfolder</code>
-          en la ruta. Si lo dejas vacío, se usa tu id de usuario.
+          Escribe el nombre exacto de la carpeta en OneDrive (ej. <code class="text-[11px]">DANFOSS</code> o
+          <code class="text-[11px]">BSH</code>). Power Automate usa
+          <code class="text-[11px] bg-white px-1 rounded border border-slate-200">onedriveSubfolder</code>.
+          Si el admin te desbloquea, puedes cambiarlo de nuevo.
         </p>
         <div class="mt-2 flex flex-col sm:flex-row gap-2 sm:items-center">
           <input
@@ -254,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
 import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
@@ -447,14 +448,27 @@ async function loadRegistros() {
 }
 
 onMounted(() => {
+  void authStore.refreshDriveConfigFromServer();
   loadRegistros();
   refreshCameraBlockedBanner();
+  document.addEventListener('visibilitychange', onHomeVisible);
 });
+
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onHomeVisible);
+});
+
+function onHomeVisible() {
+  if (document.visibilityState === 'visible') {
+    void authStore.refreshDriveConfigFromServer();
+  }
+}
 
 watch(
   () => router.currentRoute.value.name,
   (name) => {
     if (name === 'home') {
+      void authStore.refreshDriveConfigFromServer();
       loadRegistros();
       refreshCameraBlockedBanner();
       const needsSync = syncStore.queue.some(
@@ -484,9 +498,12 @@ async function saveOnedriveFolderDraft() {
   savingOnedriveFolder.value = true;
   try {
     await authStore.saveOnedriveSubfolderLabel(onedriveFolderDraft.value);
+    const name = authStore.onedriveSubfolderName;
     toastStore.success(
       'Carpeta guardada',
-      'Los próximos PDF enviarán este nombre a Power Automate como onedriveSubfolder.'
+      name
+        ? `Los próximos PDF irán a PDF-TACTICAL-SUPPORT/${name}. La carpeta se crea con el primer archivo.`
+        : 'Nombre vacío: se usará el id de usuario (no recomendado).'
     );
   } catch (e) {
     toastStore.error('Carpeta', e instanceof Error ? e.message : 'No se pudo guardar.');

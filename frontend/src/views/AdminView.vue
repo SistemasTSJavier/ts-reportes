@@ -173,14 +173,17 @@
           </div>
 
           <div class="rounded-md border border-slate-200 bg-slate-50/80 px-3 py-3 space-y-2">
-            <p class="text-xs font-semibold text-slate-700">Configuración (admin)</p>
+            <p class="text-xs font-semibold text-slate-700">Carpeta OneDrive (admin puede cambiarla ya)</p>
+            <p class="text-[11px] text-slate-500">
+              Escribe <strong>DANFOSS</strong> o <strong>BSH</strong> (igual que en OneDrive) y guarda. El siguiente PDF usa este nombre.
+            </p>
             <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
               <input
                 v-model="folderDrafts[u.user_id]"
                 type="text"
                 maxlength="120"
-                placeholder="Nombre carpeta OneDrive"
-                class="flex-1 min-w-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm"
+                placeholder="DANFOSS o BSH"
+                class="flex-1 min-w-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm uppercase"
               />
               <button
                 type="button"
@@ -188,7 +191,7 @@
                 :disabled="actingUserId === u.user_id"
                 @click="saveFolder(u.user_id)"
               >
-                Guardar carpeta + bloquear
+                Guardar carpeta ahora
               </button>
             </div>
             <div class="flex flex-wrap gap-2">
@@ -396,6 +399,7 @@ import {
 } from '../stores/accessStore';
 import { useToastStore } from '../stores/toastStore';
 import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import { sanitizeOnedriveSubfolderName } from '../stores/authStore';
 
 const access = useAccessStore();
 const toast = useToastStore();
@@ -661,9 +665,11 @@ async function deleteUserData(userId: string, label: string) {
 async function saveFolder(userId: string) {
   actingUserId.value = userId;
   try {
+    const name = sanitizeOnedriveSubfolderName(folderDrafts[userId] ?? '') ?? '';
+    folderDrafts[userId] = name;
     const res = await access.adminUpdateUserDriveConfig({
       userId,
-      onedriveSubfolder: folderDrafts[userId] ?? '',
+      onedriveSubfolder: name,
       setOnedriveSubfolder: true,
       onedriveSubfolderLocked: true
     });
@@ -671,7 +677,12 @@ async function saveFolder(userId: string) {
       toast.error('Carpeta', res.error ?? 'No se pudo guardar.');
       return;
     }
-    toast.success('Carpeta', 'Nombre guardado y bloqueado para el usuario.');
+    toast.success(
+      'Carpeta actualizada',
+      name
+        ? `Nombre guardado. El primer PDF creará PDF-TACTICAL-SUPPORT/${name} en OneDrive.`
+        : 'Nombre guardado en la app.'
+    );
     await loadUsers();
   } finally {
     actingUserId.value = null;
@@ -693,7 +704,12 @@ async function setLock(
       toast.error('Bloqueo', res.error ?? 'No se pudo actualizar.');
       return;
     }
-    toast.success('Listo', 'Permisos de configuración actualizados.');
+    toast.success(
+      'Listo',
+      opts.onedriveSubfolderLocked === false
+        ? 'Carpeta desbloqueada. El usuario verá el cambio al volver a Home y podrá guardarla.'
+        : 'Permisos de configuración actualizados.'
+    );
     await loadUsers();
   } finally {
     actingUserId.value = null;

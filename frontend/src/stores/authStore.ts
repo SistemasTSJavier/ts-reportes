@@ -99,7 +99,7 @@ export function sanitizeOnedriveSubfolderName(raw: string | null | undefined): s
   s = s.replace(/[\u0000-\u001f\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
   if (!s) return null;
   if (s.length > 120) s = s.slice(0, 120).trim();
-  return s;
+  return s.toUpperCase();
 }
 
 export const useAuthStore = defineStore('auth', {
@@ -295,8 +295,21 @@ export const useAuthStore = defineStore('auth', {
       this.logoLocked = true;
       return objectPath;
     },
+    async refreshDriveConfigFromServer(): Promise<void> {
+      if (!this.userId) return;
+      try {
+        const cfg = await this.getDriveConfigRow(this.userId);
+        if (cfg) {
+          this.driveConfigReady = true;
+          this.applyDriveConfigRow(cfg);
+        }
+      } catch (e) {
+        console.warn('[refreshDriveConfigFromServer]', e);
+      }
+    },
     async saveOnedriveSubfolderLabel(raw: string) {
       if (!this.userId) throw new Error('No hay usuario autenticado.');
+      await this.refreshDriveConfigFromServer();
       if (this.onedriveSubfolderLocked) {
         throw new Error(
           'La carpeta OneDrive ya está configurada. Contacta al administrador si necesitas cambiarla.'

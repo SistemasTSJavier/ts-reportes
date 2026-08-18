@@ -241,10 +241,36 @@ export const useAccessStore = defineStore('access', {
       if (error) {
         return { ok: false, error: error.message };
       }
-      const row = data as { ok?: boolean; error?: string; message?: string } | null;
+      const row = data as {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        files?: { bucket?: string; name?: string }[] | null;
+      } | null;
       if (!row?.ok) {
         return { ok: false, error: row?.error ?? 'No se pudo preparar el borrado.' };
       }
+
+      const files = Array.isArray(row.files) ? row.files : [];
+      const byBucket = new Map<string, string[]>();
+      for (const file of files) {
+        const bucket = file?.bucket?.trim();
+        const name = file?.name?.trim();
+        if (!bucket || !name) continue;
+        const list = byBucket.get(bucket) ?? [];
+        if (!list.includes(name)) list.push(name);
+        byBucket.set(bucket, list);
+      }
+      for (const [bucket, names] of byBucket) {
+        for (let i = 0; i < names.length; i += 50) {
+          const chunk = names.slice(i, i + 50);
+          const { error: rmErr } = await supabase.storage.from(bucket).remove(chunk);
+          if (rmErr) {
+            console.warn('[adminPrepareUserDelete] Storage API', bucket, rmErr.message);
+          }
+        }
+      }
+
       return { ok: true, message: row.message ?? 'Datos eliminados.' };
     },
     async adminListAuditLogs(options?: {
