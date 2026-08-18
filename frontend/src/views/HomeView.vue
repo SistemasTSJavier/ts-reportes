@@ -419,14 +419,19 @@ async function loadRegistros() {
     registros.value = [];
   } else {
     registros.value = data ?? [];
-    // Solo rehidrata trabajos claramente incompletos (pending/null).
-    // No reencola 'synced' ni 'error' en cada reload (evita regenerar el mismo PDF).
+    // Solo rehidrata registros MUY recientes (esta sesión). Los antiguos
+    // pendientes ya suelen estar en Drive/OneDrive aunque BD no tenga drive_file_id.
+    const REHYDRATE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+    const now = Date.now();
     const pendingDriveSync = (data ?? []).filter((r) => {
       if (!r?.id) return false;
       if (r.drive_file_id || r.pdf_storage_path) return false;
       const s = (r.sync_status ?? '').toString().trim().toLowerCase();
       if (s === 'synced' || s === 'error') return false;
-      return s === '' || s === 'pending';
+      if (s !== '' && s !== 'pending') return false;
+      const created = new Date(r.created_at).getTime();
+      if (!Number.isFinite(created) || now - created > REHYDRATE_MAX_AGE_MS) return false;
+      return true;
     });
     for (const row of pendingDriveSync) {
       await syncStore.enqueueGeneratePdf({

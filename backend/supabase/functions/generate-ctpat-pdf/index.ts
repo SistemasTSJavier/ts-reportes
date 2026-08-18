@@ -75,6 +75,28 @@ const ROOT_FOLDER_NAME = 'TS REPORTES';
 const PDF_FOLDER_NAME = 'PDFs';
 const IMAGES_FOLDER_NAME = 'Evidencias';
 
+async function findDriveFileId(
+  accessToken: string,
+  name: string,
+  parentId?: string
+): Promise<string | null> {
+  const qParts: string[] = [
+    `name='${name.replace(/'/g, "\\'")}'`,
+    "mimeType='application/pdf'",
+    'trashed=false'
+  ];
+  if (parentId) {
+    qParts.push(`'${parentId}' in parents`);
+  }
+  const q = qParts.join(' and ');
+  const res = await fetch(`${DRIVE_FILES_URL}?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=5`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { files?: { id: string; name: string }[] };
+  return data.files?.[0]?.id ?? null;
+}
+
 async function uploadToDrive(
   accessToken: string,
   fileName: string,
@@ -475,7 +497,7 @@ async function syncPdfToGoogleDrive(
   accessToken: string,
   pdfBytes: Uint8Array,
   fileName: string
-): Promise<{ driveItemId: string | null }> {
+): Promise<{ driveItemId: string | null; reusedExisting: boolean }> {
   const uid = data.user_id!;
 
   let driveCfg: UserDriveConfigRow | null = null;
@@ -510,12 +532,25 @@ async function syncPdfToGoogleDrive(
     driveCfg = upserted ?? { pdf_folder_id: pdfFolderId, images_folder_id: imagesFolderId, service_logo_file: null };
   }
 
+  const tryFindExisting = async (folderId: string | null | undefined) => {
+    if (folderId) {
+      const inFolder = await findDriveFileId(accessToken, fileName, folderId);
+      if (inFolder) return inFolder;
+    }
+    return await findDriveFileId(accessToken, fileName);
+  };
+
+  const existingId = await tryFindExisting(driveCfg?.pdf_folder_id);
+  if (existingId) {
+    return { driveItemId: existingId, reusedExisting: true };
+  }
+
   const tryUpload = async (folderId: string | null | undefined) =>
     await uploadToDrive(accessToken, fileName, pdfBytes, 'application/pdf', folderId);
 
   try {
     const pdfRes = await tryUpload(driveCfg?.pdf_folder_id);
-    return { driveItemId: pdfRes.id ?? null };
+    return { driveItemId: pdfRes.id ?? null, reusedExisting: false };
   } catch (uploadErr) {
     const message = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
     const shouldRecover = isRecoverableDriveFolderError(message);
@@ -544,7 +579,7 @@ async function syncPdfToGoogleDrive(
     );
 
     const pdfRes = await tryUpload(pdfFolderId);
-    return { driveItemId: pdfRes.id ?? null };
+    return { driveItemId: pdfRes.id ?? null, reusedExisting: false };
   }
 }
 
@@ -2606,28 +2641,52 @@ Deno.serve(async (req) => {
       return jsonError(origin, 403, 'Forbidden: registro pertenece a otra organización');
     }
 
-    // Idempotencia: no regenerar PDF ni volver a subir si ya quedó sincronizado.
-    const alreadySynced =
-      (row.sync_status ?? '').toString().trim().toLowerCase() === 'synced' &&
-      Boolean(row.drive_file_id && String(row.drive_file_id).trim());
-    if (alreadySynced && !driveOnly) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          already: true,
-          driveSynced: true,
-          needsDriveSync: false,
-          driveFile: { id: row.drive_file_id },
-          storagePath: row.pdf_storage_path
-        }),
-        {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders(origin)
-          }
+    // Idempotencia: no regenerar ni notificar OneDrive si el PDF ya existe.
+    const statusNorm = (row.sync_status ?? '').toString().trim().toLowerCase();
+    const hasDriveId = Boolean(row.drive_file_id && String(row.drive_file_id).trim());
+    const hasStoragePath = Boolean(row.pdf_storage_path && String(row.pdf_storage_path).trim());
+    const alreadySynced = statusNorm === 'synced' || hasDriveId || hasStoragePath;
+
+    const rawFolioEarly = (row.folio_pdf ?? '').toString().trim();
+    const mFileEarly = rawFolioEarly.match(/^TS-0*(\d+)$/i);
+    const folioNumEarly = mFileEarly ? Number(mFileEarly[1]) : null;
+    const folioFileEarly =
+      folioNumEarly != null ? `TS-${folioNumEarly}` : rawFolioEarly || `TS-${row.id}`;
+    const fileNameEarly = `${folioFileEarly}.pdf`;
+
+    if (!driveOnly) {
+      const existingDriveId =
+        (hasDriveId ? String(row.drive_file_id).trim() : null) ??
+        (await findDriveFileId(accessToken, fileNameEarly));
+      if (alreadySynced || existingDriveId) {
+        if (existingDriveId && !hasDriveId) {
+          await supabaseServer
+            .from('registros_ctpat')
+            .update({
+              sync_status: 'synced',
+              drive_file_id: existingDriveId
+            })
+            .eq('id', row.id)
+            .eq('user_id', row.user_id);
         }
-      );
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            already: true,
+            driveSynced: true,
+            needsDriveSync: false,
+            driveFile: { id: existingDriveId ?? row.drive_file_id },
+            storagePath: row.pdf_storage_path
+          }),
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              ...corsHeaders(origin)
+            }
+          }
+        );
+      }
     }
 
     const mergeEvidencias = (
@@ -2683,7 +2742,13 @@ Deno.serve(async (req) => {
       const folioFile = folioNumFile != null ? `TS-${folioNumFile}` : rawFolioFile || `TS-${data.id}`;
       const fileName = `${folioFile}.pdf`;
 
-      const { driveItemId } = await syncPdfToGoogleDrive(supabaseServer, data, accessToken, pdfBytes, fileName);
+      const { driveItemId, reusedExisting } = await syncPdfToGoogleDrive(
+        supabaseServer,
+        data,
+        accessToken,
+        pdfBytes,
+        fileName
+      );
 
       await supabaseServer
         .from('registros_ctpat')
@@ -2696,7 +2761,12 @@ Deno.serve(async (req) => {
         .eq('user_id', data.user_id);
 
       return new Response(
-        JSON.stringify({ ok: true, driveSynced: true, driveFile: { id: driveItemId } }),
+        JSON.stringify({
+          ok: true,
+          driveSynced: true,
+          already: reusedExisting,
+          driveFile: { id: driveItemId }
+        }),
         {
           status: 200,
           headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) }
@@ -2748,7 +2818,13 @@ Deno.serve(async (req) => {
     const fileName = `${folioFile}.pdf`;
 
     // 1) Google Drive primero para mantener el flujo histórico.
-    const { driveItemId } = await syncPdfToGoogleDrive(supabaseServer, data, accessToken, pdfBytes, fileName);
+    const { driveItemId, reusedExisting } = await syncPdfToGoogleDrive(
+      supabaseServer,
+      data,
+      accessToken,
+      pdfBytes,
+      fileName
+    );
 
     // 2) Copia en Storage (respaldo); un fallo aquí no invalida Drive.
     const storagePath = `${data.user_id}/${data.id}.pdf`;
@@ -2776,8 +2852,11 @@ Deno.serve(async (req) => {
       .eq('id', data.id)
       .eq('user_id', data.user_id);
 
-    let powerAutomate: PowerAutomateNotifyResult | 'skipped_storage_failed' = 'skipped_storage_failed';
-    if (storagePathSaved) {
+    let powerAutomate: PowerAutomateNotifyResult | 'skipped_storage_failed' | 'skipped_already_in_drive' =
+      'skipped_storage_failed';
+    if (reusedExisting) {
+      powerAutomate = 'skipped_already_in_drive';
+    } else if (storagePathSaved) {
       powerAutomate = await notifyPowerAutomateCtPatPdfReady({
         supabaseServer,
         fileName,

@@ -421,9 +421,17 @@ export const useSyncStore = defineStore('sync', {
       await this.reconcileQueueWithServer(userId);
     },
     async reconcileQueueWithServer(userId: string) {
+      const STALE_PDF_JOB_MS = 6 * 60 * 60 * 1000;
+      const nowMs = Date.now();
       this.queue = this.queue.filter((q) => {
         if (q.kind === 'create_registro_and_generate') {
           return (q.payload as CreateRegistroAndGeneratePayload).userId === userId;
+        }
+        if (q.kind === 'generate_pdf') {
+          const age = nowMs - new Date(q.updatedAt).getTime();
+          if (Number.isFinite(age) && age > STALE_PDF_JOB_MS && q.status !== 'processing') {
+            return false;
+          }
         }
         return true;
       });
@@ -433,13 +441,43 @@ export const useSyncStore = defineStore('sync', {
           q.kind === 'create_registro_and_generate' &&
           (q.status === 'pending' || q.status === 'processing' || q.status === 'error')
       );
-      if (createPending.length === 0) {
+      const pdfPending = this.queue.filter(
+        (q) =>
+          q.kind === 'generate_pdf' &&
+          (q.status === 'pending' || q.status === 'processing' || q.status === 'error')
+      );
+
+      if (createPending.length === 0 && pdfPending.length === 0) {
         await this.persist();
         return;
       }
       if (!navigator.onLine) {
         await this.persist();
         return;
+      }
+
+      for (const item of pdfPending) {
+        const rid = ((item.payload as GeneratePdfPayload).registroId ?? '').toString().trim();
+        if (!rid) continue;
+        const { data: existingPdf } = await supabase
+          .from('registros_ctpat')
+          .select('sync_status, drive_file_id, pdf_storage_path, created_at')
+          .eq('id', rid)
+          .maybeSingle();
+        if (registroLooksSyncedOnServer(existingPdf)) {
+          item.status = 'done';
+          rememberCompletedPdfId(userId, rid);
+          item.lastError = undefined;
+          item.updatedAt = new Date().toISOString();
+          continue;
+        }
+        const created = existingPdf?.created_at ? new Date(String(existingPdf.created_at)).getTime() : NaN;
+        if (Number.isFinite(created) && Date.now() - created > STALE_PDF_JOB_MS) {
+          item.status = 'done';
+          rememberCompletedPdfId(userId, rid);
+          item.lastError = undefined;
+          item.updatedAt = new Date().toISOString();
+        }
       }
 
       const now = new Date().toISOString();
@@ -473,6 +511,9 @@ export const useSyncStore = defineStore('sync', {
         item.lastError = undefined;
         item.updatedAt = now;
       }
+      this.queue = this.queue.filter(
+        (q) => q.status === 'pending' || q.status === 'error' || q.status === 'processing'
+      );
       await this.persist();
     },
     async loadFromStorageForUser(userId: string) {
@@ -699,10 +740,17 @@ export const useSyncStore = defineStore('sync', {
       if (navigator.onLine) {
         const { data: existingReg } = await supabase
           .from('registros_ctpat')
-          .select('sync_status, drive_file_id, pdf_storage_path')
+          .select('sync_status, drive_file_id, pdf_storage_path, created_at')
           .eq('id', registroId)
           .maybeSingle();
         if (registroLooksSyncedOnServer(existingReg)) {
+          rememberCompletedPdfId(uid, registroId);
+          return;
+        }
+        const createdAtMs = existingReg?.created_at
+          ? new Date(String(existingReg.created_at)).getTime()
+          : NaN;
+        if (Number.isFinite(createdAtMs) && Date.now() - createdAtMs > 6 * 60 * 60 * 1000) {
           rememberCompletedPdfId(uid, registroId);
           return;
         }
@@ -805,15 +853,21 @@ export const useSyncStore = defineStore('sync', {
               // Idempotencia: si BD ya lo marca sincronizado, no regenerar PDF.
               const { data: existingReg } = await supabase
                 .from('registros_ctpat')
-                .select('sync_status, drive_file_id, pdf_storage_path')
+                .select('sync_status, drive_file_id, pdf_storage_path, created_at')
                 .eq('id', rid)
                 .maybeSingle();
 
               const status = (existingReg?.sync_status ?? '').toString().trim().toLowerCase();
+              const createdAtMs = existingReg?.created_at
+                ? new Date(String(existingReg.created_at)).getTime()
+                : NaN;
+              const isOldRegistro =
+                Number.isFinite(createdAtMs) && Date.now() - createdAtMs > 6 * 60 * 60 * 1000;
               const alreadySynced =
                 status === 'synced' ||
                 Boolean(existingReg?.drive_file_id) ||
                 Boolean(existingReg?.pdf_storage_path) ||
+                isOldRegistro ||
                 wasPdfCompletedLocally(this.boundUserId, rid);
 
               if (alreadySynced) {
