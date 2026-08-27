@@ -24,8 +24,47 @@ async function finishReady() {
   emit('ready');
 }
 
+async function unenrollTotpFactors() {
+  const { data: factors } = await supabase.auth.mfa.listFactors();
+  const all = [...(factors?.all ?? []), ...(factors?.totp ?? [])];
+  const seen = new Set<string>();
+  for (const f of all) {
+    if (!f?.id || seen.has(f.id)) continue;
+    if (f.factor_type && f.factor_type !== 'totp') continue;
+    seen.add(f.id);
+    await supabase.auth.mfa.unenroll({ factorId: f.id });
+  }
+}
+
+async function startEnroll() {
+  busy.value = true;
+  error.value = null;
+  qr.value = null;
+  secret.value = null;
+  try {
+    // Limpia intentos previos (verified o unverified) que bloquean el nombre.
+    await unenrollTotpFactors();
+    const friendlyName = `Tactical Admin ${Date.now()}`;
+    const { data, error: err } = await supabase.auth.mfa.enroll({
+      factorType: 'totp',
+      friendlyName
+    });
+    if (err || !data) throw err ?? new Error('No se pudo iniciar MFA');
+    factorId.value = data.id;
+    qr.value = data.totp.qr_code;
+    secret.value = data.totp.secret;
+    mode.value = 'enroll';
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Error al enrolar MFA';
+    mode.value = 'enroll';
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function bootstrap() {
   mode.value = 'loading';
+  error.value = null;
   const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
   if (aal?.currentLevel === 'aal2') {
     await access.syncContext();
@@ -39,23 +78,8 @@ async function bootstrap() {
     mode.value = 'challenge';
     return;
   }
-  mode.value = 'enroll';
-  busy.value = true;
-  error.value = null;
-  try {
-    const { data, error: err } = await supabase.auth.mfa.enroll({
-      factorType: 'totp',
-      friendlyName: 'Tactical Admin'
-    });
-    if (err || !data) throw err ?? new Error('No se pudo iniciar MFA');
-    factorId.value = data.id;
-    qr.value = data.totp.qr_code;
-    secret.value = data.totp.secret;
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : 'Error al enrolar MFA';
-  } finally {
-    busy.value = false;
-  }
+  // Hay factor a medias o ninguno: (re)enrolar limpio.
+  await startEnroll();
 }
 
 async function verifyCode() {
@@ -105,6 +129,9 @@ watch(
         <p class="text-sm text-slate-700">Escanea el QR con tu app de autenticación e introduce el código.</p>
         <img v-if="qr" :src="qr" alt="QR MFA" class="mx-auto max-w-[200px]" />
         <p v-if="secret" class="text-[11px] break-all text-slate-500">Secret: {{ secret }}</p>
+        <p v-if="!qr && !busy" class="text-sm text-amber-700">
+          No hay QR. Pulsa «Reiniciar MFA» e inténtalo de nuevo.
+        </p>
       </template>
       <p v-else class="text-sm text-slate-700">Introduce el código de tu app autenticadora.</p>
       <input
@@ -116,8 +143,16 @@ watch(
         class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
         @keyup.enter="verifyCode"
       />
-      <button type="button" class="btn-primary w-full" :disabled="busy" @click="verifyCode">
+      <button type="button" class="btn-primary w-full" :disabled="busy || !factorId" @click="verifyCode">
         {{ busy ? 'Verificando…' : mode === 'enroll' ? 'Activar MFA' : 'Continuar' }}
+      </button>
+      <button
+        type="button"
+        class="btn-secondary w-full text-xs"
+        :disabled="busy"
+        @click="startEnroll"
+      >
+        Reiniciar MFA (nuevo QR)
       </button>
     </div>
 
