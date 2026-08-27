@@ -10,7 +10,8 @@
     "deploy:generate-ctpat-pdf": "supabase functions deploy generate-ctpat-pdf --project-ref ouqwinavncjyyywvfyci --use-api --yes --workdir backend",
     "deploy:purge-expired-ctpat-data": "supabase functions deploy purge-expired-ctpat-data --project-ref ouqwinavncjyyywvfyci --use-api --yes --workdir backend",
     "deploy:verify-turnstile": "supabase functions deploy verify-turnstile --project-ref ouqwinavncjyyywvfyci --use-api --yes --workdir backend",
-    "deploy:functions": "npm run deploy:generate-ctpat-pdf && npm run deploy:purge-expired-ctpat-data && npm run deploy:verify-turnstile",
+    "deploy:admin-delete-user": "supabase functions deploy admin-delete-user --project-ref ouqwinavncjyyywvfyci --use-api --yes --workdir backend",
+    "deploy:functions": "npm run deploy:generate-ctpat-pdf && npm run deploy:purge-expired-ctpat-data && npm run deploy:verify-turnstile && npm run deploy:admin-delete-user",
     "supabase:secrets:list": "supabase secrets list --project-ref ouqwinavncjyyywvfyci --workdir backend"
   },
   "devDependencies": {

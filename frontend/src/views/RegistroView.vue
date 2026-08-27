@@ -34,24 +34,36 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import RegistroForm from '../components/RegistroForm.vue';
 import { useAuthStore } from '../stores/authStore';
-import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import { resolveServiceLogoUrl } from '../utils/serviceLogoUrl';
 
 const auth = useAuthStore();
 
-/** Misma lógica que Home: fallback `logo.png` y ruta `logos/<user>.png` desde BD al entrar al formulario. */
-const serviceLogoSrc = computed(() =>
-  getServiceLogoPublicUrl(auth.serviceLogoFile || 'logo.png')
-);
+const serviceLogoSrc = ref('/logo.png');
+
+async function refreshLogo() {
+  serviceLogoSrc.value = (await resolveServiceLogoUrl(auth.serviceLogoFile || 'logo.png')) || '/logo.png';
+}
 
 onMounted(async () => {
-  if (!auth.isSignedIn || !auth.userId) return;
+  if (!auth.isSignedIn || !auth.userId) {
+    await refreshLogo();
+    return;
+  }
   try {
     await auth.ensureDriveConfigIfNeeded();
   } catch {
     /* la fila user_drive_config puede cargarse después; el logo sigue con fallback */
   }
+  await refreshLogo();
 });
+
+watch(
+  () => auth.serviceLogoFile,
+  () => {
+    void refreshLogo();
+  }
+);
 </script>

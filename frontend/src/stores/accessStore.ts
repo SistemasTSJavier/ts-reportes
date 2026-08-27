@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { supabase } from '../supabaseClient';
 
-export type UserAccessStatus = 'pending' | 'approved' | 'rejected';
+export type UserAccessStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 
 export interface AccessUserRow {
   user_id: string;
@@ -53,6 +53,7 @@ interface AccessState {
   loading: boolean;
   status: UserAccessStatus | null;
   isAdmin: boolean;
+  aal: string | null;
 }
 
 export const useAccessStore = defineStore('access', {
@@ -60,12 +61,14 @@ export const useAccessStore = defineStore('access', {
     ready: false,
     loading: false,
     status: null,
-    isAdmin: false
+    isAdmin: false,
+    aal: null
   }),
   getters: {
     isApproved: (s) => s.status === 'approved',
-    isPending: (s) => s.status === 'pending',
-    isRejected: (s) => s.status === 'rejected'
+    isPending: (s) => s.status === 'pending' || s.status === 'expired',
+    isRejected: (s) => s.status === 'rejected',
+    needsMfa: (s) => s.isAdmin && s.aal !== 'aal2'
   },
   actions: {
     reset() {
@@ -73,6 +76,7 @@ export const useAccessStore = defineStore('access', {
       this.loading = false;
       this.status = null;
       this.isAdmin = false;
+      this.aal = null;
     },
     async syncContext(): Promise<void> {
       this.loading = true;
@@ -82,15 +86,23 @@ export const useAccessStore = defineStore('access', {
           console.error('[accessStore] sync_user_access_context:', error.message);
           this.status = 'pending';
           this.isAdmin = false;
+          this.aal = null;
           return;
         }
-        const row = data as { ok?: boolean; status?: UserAccessStatus; is_admin?: boolean } | null;
+        const row = data as {
+          ok?: boolean;
+          status?: UserAccessStatus;
+          is_admin?: boolean;
+          aal?: string;
+        } | null;
         if (row?.ok) {
           this.status = row.status ?? 'pending';
           this.isAdmin = row.is_admin === true;
+          this.aal = row.aal ?? 'aal1';
         } else {
           this.status = 'pending';
           this.isAdmin = false;
+          this.aal = null;
         }
       } finally {
         this.ready = true;
@@ -235,43 +247,39 @@ export const useAccessStore = defineStore('access', {
     async adminPrepareUserDelete(
       userId: string
     ): Promise<{ ok: boolean; error?: string; message?: string }> {
-      const { data, error } = await supabase.rpc('admin_prepare_user_delete', {
-        p_user_id: userId
-      });
-      if (error) {
-        return { ok: false, error: error.message };
+      const { data: sessionData } = await supabase.auth.getSession();
+      const jwt = sessionData.session?.access_token?.trim();
+      const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
+      const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+      if (!jwt || !baseUrl || !anonKey) {
+        return { ok: false, error: 'No hay sesión para eliminar el usuario.' };
       }
-      const row = data as {
-        ok?: boolean;
-        error?: string;
-        message?: string;
-        files?: { bucket?: string; name?: string }[] | null;
-      } | null;
-      if (!row?.ok) {
-        return { ok: false, error: row?.error ?? 'No se pudo preparar el borrado.' };
-      }
-
-      const files = Array.isArray(row.files) ? row.files : [];
-      const byBucket = new Map<string, string[]>();
-      for (const file of files) {
-        const bucket = file?.bucket?.trim();
-        const name = file?.name?.trim();
-        if (!bucket || !name) continue;
-        const list = byBucket.get(bucket) ?? [];
-        if (!list.includes(name)) list.push(name);
-        byBucket.set(bucket, list);
-      }
-      for (const [bucket, names] of byBucket) {
-        for (let i = 0; i < names.length; i += 50) {
-          const chunk = names.slice(i, i + 50);
-          const { error: rmErr } = await supabase.storage.from(bucket).remove(chunk);
-          if (rmErr) {
-            console.warn('[adminPrepareUserDelete] Storage API', bucket, rmErr.message);
-          }
+      try {
+        const res = await fetch(`${baseUrl}/functions/v1/admin-delete-user`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${jwt}`,
+            apikey: anonKey
+          },
+          body: JSON.stringify({ userId })
+        });
+        const row = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          error?: string;
+          message?: string;
+          warning?: string;
+        } | null;
+        if (!res.ok || !row?.ok) {
+          return { ok: false, error: row?.error ?? `HTTP ${res.status}` };
         }
+        return {
+          ok: true,
+          message: row.message ?? row.warning ?? 'Usuario eliminado.'
+        };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : 'Error de red.' };
       }
-
-      return { ok: true, message: row.message ?? 'Datos eliminados.' };
     },
     async adminListAuditLogs(options?: {
       limit?: number;

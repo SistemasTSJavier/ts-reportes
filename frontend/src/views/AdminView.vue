@@ -1,5 +1,7 @@
 <template>
   <div class="space-y-6">
+    <AdminMfaGate v-if="access.isAdmin && access.aal !== 'aal2'" @ready="onMfaReady" />
+    <template v-else>
     <section>
       <h2 class="text-xl font-bold text-slate-800">Panel de administración</h2>
       <p class="text-sm text-slate-500 mt-1">
@@ -384,6 +386,7 @@
         </div>
       </section>
     </div>
+    </template>
   </div>
 </template>
 
@@ -398,11 +401,31 @@ import {
   type UserAccessStatus
 } from '../stores/accessStore';
 import { useToastStore } from '../stores/toastStore';
-import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import { resolveServiceLogoUrl } from '../utils/serviceLogoUrl';
 import { sanitizeOnedriveSubfolderName } from '../stores/authStore';
+import AdminMfaGate from '../components/AdminMfaGate.vue';
 
 const access = useAccessStore();
 const toast = useToastStore();
+const logoSrcCache = reactive<Record<string, string>>({});
+
+async function ensureLogo(file: string | null | undefined) {
+  const key = file?.trim() ?? '';
+  if (!key || logoSrcCache[key]) return;
+  logoSrcCache[key] = await resolveServiceLogoUrl(key);
+}
+
+function logoUrl(file: string | null | undefined): string {
+  const key = file?.trim() ?? '';
+  if (!key) return '';
+  void ensureLogo(key);
+  return logoSrcCache[key] ?? '';
+}
+
+function onMfaReady() {
+  void loadUsers();
+  void loadCodes();
+}
 
 const users = ref<AdminUserOverviewRow[]>([]);
 const codes = ref<AccessCodeRow[]>([]);
@@ -456,10 +479,6 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
-}
-
-function logoUrl(file: string | null | undefined): string {
-  return getServiceLogoPublicUrl(file);
 }
 
 function shortTableName(name: string): string {
@@ -717,7 +736,9 @@ async function setLock(
 }
 
 onMounted(() => {
-  void loadUsers();
-  void loadCodes();
+  if (access.aal === 'aal2') {
+    void loadUsers();
+    void loadCodes();
+  }
 });
 </script>

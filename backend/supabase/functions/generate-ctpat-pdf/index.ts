@@ -8,6 +8,12 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, PDFImage, degrees } from 'npm:pdf-lib@1.17.1';
 import { WATERMARK_LOGO_PNG_BASE64 } from './watermarkLogoEmbedded.ts';
+import { corsHeaders } from '../_shared/cors.ts';
+import {
+  decryptSecret,
+  encryptSecret,
+  refreshGoogleAccessToken
+} from '../_shared/googleTokenCrypto.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -585,6 +591,7 @@ async function syncPdfToGoogleDrive(
 
 type PowerAutomateNotifyResult =
   | 'skipped_no_webhook_url'
+  | 'skipped_no_secret'
   | 'skipped_signed_url_failed'
   | 'delivered'
   | 'http_error'
@@ -600,23 +607,13 @@ function sanitizeOnedriveSubfolderName(raw: string | null | undefined): string |
   return s;
 }
 
-function inferOnedriveClienteFolder(
+function resolveOnedriveSubfolder(
   configuredName: string | null,
-  serviceLogoFile: string | null | undefined
-): string | null {
+  userId: string
+): string {
   const custom = sanitizeOnedriveSubfolderName(configuredName);
   if (custom) return custom.toUpperCase();
-
-  const s = (serviceLogoFile ?? '').toString().toLowerCase();
-  if (!s) return null;
-  if (s.includes('danfoss')) return 'DANFOSS';
-  if (s.includes('bsh')) return 'BSH';
-  if (s.includes('caterpillar')) return 'CATERPILLAR';
-  if (s.includes('komatsu')) return 'KOMATSU';
-  if (s.includes('john_deere') || s.includes('johndeere') || s.includes('john-deere')) {
-    return 'JOHN_DEERE';
-  }
-  return null;
+  return userId;
 }
 
 /**
@@ -643,13 +640,19 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
   }
 
   const webhookSecret = Deno.env.get('POWER_AUTOMATE_CTPAT_WEBHOOK_SECRET')?.trim() ?? '';
+  if (!webhookSecret) {
+    console.warn(
+      '[generate-ctpat-pdf] Power Automate: falta POWER_AUTOMATE_CTPAT_WEBHOOK_SECRET (fail-closed).'
+    );
+    return 'skipped_no_secret';
+  }
   const onedriveFolderShareUrl = Deno.env.get('POWER_AUTOMATE_CTPAT_ONEDRIVE_FOLDER_URL')?.trim() ?? '';
   const onedriveRootFolder =
     Deno.env.get('POWER_AUTOMATE_CTPAT_ONEDRIVE_ROOT')?.trim() || 'PDF-TACTICAL-SUPPORT';
 
   const { data: signed, error: signErr } = await params.supabaseServer.storage
     .from(PDF_STORAGE_BUCKET)
-    .createSignedUrl(params.storagePath, 3600);
+    .createSignedUrl(params.storagePath, 600);
 
   if (signErr || !signed?.signedUrl) {
     console.warn('[generate-ctpat-pdf] Power Automate: createSignedUrl falló', signErr?.message ?? 'sin URL');
@@ -658,14 +661,16 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
 
   const { data: udcSub } = await params.supabaseServer
     .from('user_drive_config')
-    .select('onedrive_subfolder_name, service_logo_file')
+    .select('onedrive_subfolder_name')
     .eq('user_id', params.userId)
     .maybeSingle();
 
-  const onedriveSubfolder =
-    inferOnedriveClienteFolder(udcSub?.onedrive_subfolder_name ?? null, udcSub?.service_logo_file) ??
-    params.userId;
+  const onedriveSubfolder = resolveOnedriveSubfolder(
+    udcSub?.onedrive_subfolder_name ?? null,
+    params.userId
+  );
   const onedriveRelativePath = `${onedriveRootFolder}/${onedriveSubfolder}/${params.fileName}`;
+  const folderPath = `/${onedriveRootFolder}/${onedriveSubfolder}`;
 
   const body = {
     event: 'ctpat_pdf_ready',
@@ -673,9 +678,10 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
     registroId: params.registroId,
     organizationId: params.organizationId,
     userId: params.userId,
-    /** Carpeta cliente: DANFOSS / BSH / nombre configurado. No usar el UUID. */
+    /** Nombre guardado en la app; si no hay, UUID del usuario (no se infiere del logo). */
     onedriveSubfolder,
     cliente: onedriveSubfolder,
+    folderPath,
     onedriveRootFolder,
     onedriveRelativePath,
     storagePath: params.storagePath,
@@ -695,10 +701,10 @@ async function notifyPowerAutomateCtPatPdfReady(params: {
   const kill = setTimeout(() => controller.abort(), 15_000);
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (webhookSecret) {
-      headers['X-Webhook-Secret'] = webhookSecret;
-    }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Webhook-Secret': webhookSecret
+    };
 
     const res = await fetch(webhookUrl, {
       method: 'POST',
@@ -2525,14 +2531,6 @@ async function buildPdf(
 }
 
 
-function corsHeaders(origin: string | null): HeadersInit {
-  return {
-    'Access-Control-Allow-Origin': origin ?? '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS'
-  };
-}
-
 /** JWT `sub` y UUID de Postgres deben compararse en la misma forma (evita 403 fantasma). */
 function normalizeUuid(s: string | null | undefined): string {
   return (s ?? '').trim().toLowerCase();
@@ -2556,6 +2554,10 @@ async function sanitizeRegistroSensitiveColumns(
       checklist_caja: null,
       inspeccion_agricola: null,
       inspeccion_mecanica: null,
+      firma_operador: null,
+      firma_oficial: null,
+      image_urls: null,
+      evidencias_exif: null,
       purged_sensitive_at: now.toISOString(),
       expires_at: expiresAt
     })
@@ -2631,25 +2633,80 @@ Deno.serve(async (req) => {
   let registroIdForCleanup: string | null = null;
   try {
     const body = (await req.json()) as {
+      action?: string;
       registroId?: string;
       driveOnly?: boolean;
       accessToken?: string;
+      refreshToken?: string;
     };
-
-    const registroId = typeof body.registroId === 'string' ? body.registroId : null;
-    const driveOnly = body.driveOnly === true;
-    const accessToken = typeof body.accessToken === 'string' ? body.accessToken.trim() : '';
-
-    if (!registroId) {
-      return jsonError(origin, 400, 'registroId es requerido');
-    }
-    if (!accessToken) {
-      return jsonError(origin, 400, 'accessToken de Google es requerido');
-    }
 
     const supabaseServer = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { persistSession: false }
     });
+
+    // Guardar refresh token cifrado (fase 4).
+    if (body.action === 'storeGoogleRefreshToken') {
+      const refresh =
+        typeof body.refreshToken === 'string' ? body.refreshToken.trim() : '';
+      if (!refresh) {
+        return jsonError(origin, 400, 'refreshToken es requerido.');
+      }
+      const encKey = Deno.env.get('GOOGLE_TOKEN_ENC_KEY')?.trim() ?? '';
+      if (!encKey) {
+        return jsonError(origin, 503, 'GOOGLE_TOKEN_ENC_KEY no configurado.');
+      }
+      const enc = await encryptSecret(encKey, refresh);
+      await supabaseServer.from('user_drive_config').upsert(
+        {
+          user_id: authContext.userId,
+          google_refresh_token_enc: enc,
+          google_token_updated_at: new Date().toISOString()
+        },
+        { onConflict: 'user_id' }
+      );
+      return new Response(JSON.stringify({ ok: true, stored: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) }
+      });
+    }
+
+    const registroId = typeof body.registroId === 'string' ? body.registroId : null;
+    const driveOnly = body.driveOnly === true;
+    let accessToken = typeof body.accessToken === 'string' ? body.accessToken.trim() : '';
+
+    if (!registroId) {
+      return jsonError(origin, 400, 'registroId es requerido');
+    }
+
+    // Preferir access token del servidor vía refresh almacenado; body.accessToken es fallback.
+    if (!accessToken) {
+      const encKey = Deno.env.get('GOOGLE_TOKEN_ENC_KEY')?.trim() ?? '';
+      const { data: tokRow } = await supabaseServer
+        .from('user_drive_config')
+        .select('google_refresh_token_enc')
+        .eq('user_id', authContext.userId)
+        .maybeSingle();
+      const enc = (tokRow?.google_refresh_token_enc as string | null)?.trim() ?? '';
+      if (encKey && enc) {
+        try {
+          const refresh = await decryptSecret(encKey, enc);
+          accessToken = await refreshGoogleAccessToken(refresh);
+        } catch (e) {
+          console.warn(
+            '[generate-ctpat-pdf] refresh Google falló:',
+            e instanceof Error ? e.message : String(e)
+          );
+        }
+      }
+    }
+
+    if (!accessToken) {
+      return jsonError(
+        origin,
+        400,
+        'No hay token de Google. Vuelve a iniciar sesión con Google Drive o configura refresh en servidor.'
+      );
+    }
 
     const { data: row, error: rowErr } = await supabaseServer
       .from('registros_ctpat')

@@ -15,6 +15,11 @@ import {
   OFFLINE_INTEGRITY_VERSION,
   verifyOfflinePackageIntegrity
 } from '../utils/offlinePackageIntegrity';
+import {
+  clearOfflineCryptoKey,
+  decryptOfflinePayload,
+  encryptOfflinePayload
+} from '../utils/offlineQueueCrypto';
 
 export type SyncKind = 'create_registro_and_generate' | 'generate_pdf';
 
@@ -167,15 +172,11 @@ async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
   const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
   const auth = useAuthStore();
 
-  const readGoogleAccessToken = async (): Promise<string> => {
+  const readGoogleAccessToken = async (): Promise<string | null> => {
     const {
       data: { session: oauthSession }
     } = await supabase.auth.getSession();
-    const token = oauthSession?.provider_token?.trim();
-    if (!token) {
-      throw new Error('No hay token de Google Drive. Cierra sesión y vuelve a iniciar con Google.');
-    }
-    return token;
+    return oauthSession?.provider_token?.trim() || null;
   };
 
   let googleAccessToken = await readGoogleAccessToken();
@@ -190,13 +191,17 @@ async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
     throw new Error('Falta VITE_SUPABASE_ANON_KEY en el entorno de la app.');
   }
 
-  const runOnce = async (userJwt: string, googleToken: string): Promise<void> => {
+  const runOnce = async (userJwt: string, googleToken: string | null): Promise<void> => {
     const trimmedJwt = userJwt.trim();
     if (!trimmedJwt) {
       throw new Error('No hay token de sesión para llamar a la función.');
     }
 
     const url = `${baseUrl}/functions/v1/generate-ctpat-pdf`;
+    const payload: Record<string, string> = { registroId };
+    // Preferir refresh en servidor; accessToken es fallback de transición.
+    if (googleToken) payload.accessToken = googleToken;
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -205,10 +210,7 @@ async function invokeGenerateCtpatPdf(registroId: string): Promise<void> {
         apikey: anonKey,
         'X-Client-Info': 'ts-ctpat-pwa'
       },
-      body: JSON.stringify({
-        registroId,
-        accessToken: googleToken
-      })
+      body: JSON.stringify(payload)
     });
 
     const text = await res.text();
@@ -402,6 +404,7 @@ export const useSyncStore = defineStore('sync', {
   }),
   actions: {
     resetForSignOut() {
+      if (this.boundUserId) clearOfflineCryptoKey(this.boundUserId);
       this.boundUserId = null;
       this.queue = [];
       this.history = [];
@@ -518,9 +521,24 @@ export const useSyncStore = defineStore('sync', {
     },
     async loadFromStorageForUser(userId: string) {
       const keys = userStorageKeys(userId);
+      const parseStored = async (raw: unknown): Promise<SyncItem[] | null> => {
+        if (raw == null) return null;
+        if (typeof raw === 'string') {
+          try {
+            const plain = raw.startsWith('enc1.')
+              ? await decryptOfflinePayload(userId, raw)
+              : raw;
+            return normalizeQueueItems(JSON.parse(plain));
+          } catch {
+            return null;
+          }
+        }
+        if (Array.isArray(raw)) return normalizeQueueItems(raw as SyncItem[]);
+        return null;
+      };
       try {
-        let queueFromDb = await idbGet<SyncItem[]>(keys.queue);
-        let historyFromDb = await idbGet<SyncItem[]>(keys.history);
+        let queueFromDb = await parseStored(await idbGet<unknown>(keys.queue));
+        let historyFromDb = await parseStored(await idbGet<unknown>(keys.history));
 
         if (!queueFromDb) {
           const legacy = localStorage.getItem(LEGACY_QUEUE_KEY);
@@ -539,23 +557,17 @@ export const useSyncStore = defineStore('sync', {
           }
         }
 
-        this.queue = queueFromDb ? normalizeQueueItems(queueFromDb) : [];
-        this.history = historyFromDb && Array.isArray(historyFromDb) ? historyFromDb : [];
-
         if (!queueFromDb) {
           const raw = localStorage.getItem(keys.queue);
-          if (raw) {
-            this.queue = normalizeQueueItems(JSON.parse(raw));
-            await idbSet(keys.queue, cloneForIndexedDb(this.queue));
-          }
+          if (raw) queueFromDb = await parseStored(raw);
         }
         if (!historyFromDb) {
-          const rawHistory = localStorage.getItem(keys.history);
-          if (rawHistory) {
-            this.history = JSON.parse(rawHistory) as SyncItem[];
-            await idbSet(keys.history, cloneForIndexedDb(this.history));
-          }
+          const rawH = localStorage.getItem(keys.history);
+          if (rawH) historyFromDb = await parseStored(rawH);
         }
+
+        this.queue = queueFromDb ?? [];
+        this.history = historyFromDb && Array.isArray(historyFromDb) ? historyFromDb : [];
 
         const legacyCompleted = localStorage.getItem(LEGACY_COMPLETED_PDF_IDS_KEY);
         if (legacyCompleted && !localStorage.getItem(keys.completedPdfs)) {
@@ -570,8 +582,27 @@ export const useSyncStore = defineStore('sync', {
         console.warn('SyncStore: IndexedDB no disponible, usando localStorage', e);
         const raw = localStorage.getItem(keys.queue);
         const rawHistory = localStorage.getItem(keys.history);
-        this.queue = raw ? normalizeQueueItems(JSON.parse(raw)) : [];
-        this.history = rawHistory ? JSON.parse(rawHistory) : [];
+        try {
+          this.queue = raw
+            ? ((await (async () => {
+                const plain = raw.startsWith('enc1.')
+                  ? await decryptOfflinePayload(userId, raw)
+                  : raw;
+                return normalizeQueueItems(JSON.parse(plain));
+              })()) as SyncItem[])
+            : [];
+          this.history = rawHistory
+            ? ((await (async () => {
+                const plain = rawHistory.startsWith('enc1.')
+                  ? await decryptOfflinePayload(userId, rawHistory)
+                  : rawHistory;
+                return JSON.parse(plain) as SyncItem[];
+              })()) as SyncItem[])
+            : [];
+        } catch {
+          this.queue = [];
+          this.history = [];
+        }
         if (this.rescueStuckProcessingItems()) {
           await this.persist();
         }
@@ -646,16 +677,27 @@ export const useSyncStore = defineStore('sync', {
     async persist() {
       if (!this.boundUserId) return;
       const keys = userStorageKeys(this.boundUserId);
+      const queuePlain = JSON.stringify(this.queue);
+      const historyPlain = JSON.stringify(this.history);
+      let queueStore: unknown = cloneForIndexedDb(this.queue);
+      let historyStore: unknown = cloneForIndexedDb(this.history);
+      let queueLs = queuePlain;
+      let historyLs = historyPlain;
       try {
-        await Promise.all([
-          idbSet(keys.queue, cloneForIndexedDb(this.queue)),
-          idbSet(keys.history, cloneForIndexedDb(this.history))
-        ]);
+        queueLs = await encryptOfflinePayload(this.boundUserId, queuePlain);
+        historyLs = await encryptOfflinePayload(this.boundUserId, historyPlain);
+        queueStore = queueLs;
+        historyStore = historyLs;
+      } catch (e) {
+        console.warn('SyncStore: no se pudo cifrar cola offline', e);
+      }
+      try {
+        await Promise.all([idbSet(keys.queue, queueStore), idbSet(keys.history, historyStore)]);
       } catch (e) {
         console.warn('SyncStore: error guardando en IndexedDB, usando localStorage', e);
       }
-      localStorage.setItem(keys.queue, JSON.stringify(this.queue));
-      localStorage.setItem(keys.history, JSON.stringify(this.history));
+      localStorage.setItem(keys.queue, queueLs);
+      localStorage.setItem(keys.history, historyLs);
     },
     /**
      * JWT inválido (p. ej. usuario borrado en Supabase, refresh revocado): limpia cola local y cierra sesión.

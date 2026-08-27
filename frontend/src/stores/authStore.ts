@@ -428,6 +428,7 @@ export const useAuthStore = defineStore('auth', {
           const access = useAccessStore();
           await access.syncContext();
           await useSyncStore().bindUser(this.userId);
+          void this.storeGoogleRefreshTokenIfPresent(session);
           if (access.isApproved) {
             await this.ensureDriveConfigIfNeeded();
           }
@@ -535,7 +536,9 @@ export const useAuthStore = defineStore('auth', {
       this.onedriveSubfolderLocked = false;
     },
     async signInWithGoogle() {
-      useTurnstileStore().assertPassed();
+      const turnstile = useTurnstileStore();
+      turnstile.assertPassed();
+      await turnstile.consumeLoginTicket();
       this.loading = true;
       // Usar el origen real de la pestaña evita errores OAuth 400 cuando VITE_SITE_URL
       // quedó apuntando a localhost en un despliegue remoto.
@@ -550,7 +553,8 @@ export const useAuthStore = defineStore('auth', {
             redirectTo,
             scopes: 'openid profile email https://www.googleapis.com/auth/drive.file',
             queryParams: {
-              access_type: 'offline'
+              access_type: 'offline',
+              prompt: 'consent'
             }
           }
         });
@@ -561,8 +565,32 @@ export const useAuthStore = defineStore('auth', {
         }
       } catch (e) {
         console.error('Error signInWithGoogle:', e);
+        throw e;
       } finally {
         this.loading = false;
+      }
+    },
+    /** Guarda refresh token de Google cifrado en el servidor (si la sesión lo trae). */
+    async storeGoogleRefreshTokenIfPresent(session: Session | null): Promise<void> {
+      const refresh = (session as Session & { provider_refresh_token?: string | null } | null)
+        ?.provider_refresh_token?.trim();
+      if (!refresh || !this.userId) return;
+      const jwt = session?.access_token?.trim();
+      const baseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim().replace(/\/$/, '');
+      const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+      if (!jwt || !baseUrl || !anonKey) return;
+      try {
+        await fetch(`${baseUrl}/functions/v1/generate-ctpat-pdf`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${jwt}`,
+            apikey: anonKey
+          },
+          body: JSON.stringify({ action: 'storeGoogleRefreshToken', refreshToken: refresh })
+        });
+      } catch (e) {
+        console.warn('[auth] storeGoogleRefreshToken:', e);
       }
     },
     async signOut() {

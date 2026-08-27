@@ -259,7 +259,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { supabase } from '../supabaseClient';
 import { isSessionExpiredError } from '../utils/supabaseAuthErrors';
-import { getServiceLogoPublicUrl } from '../utils/serviceLogoUrl';
+import { resolveServiceLogoUrl } from '../utils/serviceLogoUrl';
 import { isAllowedServiceLogoFile, SERVICE_LOGO_ACCEPT } from '../utils/normalizeServiceLogoUpload';
 import {
   clearRegistroCameraBlockedHint,
@@ -275,6 +275,19 @@ const authStore = useAuthStore();
 const syncStore = useSyncStore();
 const pwa = usePwaStore();
 const toastStore = useToastStore();
+
+const serviceLogoPreviewUrl = ref('/logo.png');
+async function refreshHomeLogo() {
+  serviceLogoPreviewUrl.value =
+    (await resolveServiceLogoUrl(authStore.serviceLogoFile || 'logo.png')) || '/logo.png';
+}
+watch(
+  () => authStore.serviceLogoFile,
+  () => {
+    void refreshHomeLogo();
+  },
+  { immediate: true }
+);
 
 const movementFilter = ref<'all' | 'entrada' | 'salida'>('all');
 const registros = ref<Array<{
@@ -351,7 +364,6 @@ const syncStatusClass = computed(() => {
   if (syncStore.syncing || pendingSyncCount.value > 0) return 'bg-blue-100 text-blue-800';
   return 'bg-emerald-100 text-emerald-800';
 });
-const serviceLogoPreviewUrl = computed(() => getServiceLogoPublicUrl(authStore.serviceLogoFile || 'logo.png'));
 
 function formatFolio(folio: string | null | undefined): string {
   if (!folio || typeof folio !== 'string') return '';
